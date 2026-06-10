@@ -105,6 +105,30 @@ impl EventListener for EventProxy {
     }
 }
 
+/// Environment for the `baduhan browse/reload` control CLI: the pane's
+/// identity, the exe path, and WSLENV plumbing so WSL shells inherit both
+/// (the /p flag translates the exe path to /mnt/c/... form).
+fn ctl_env(pane_id: u64) -> Vec<(String, String)> {
+    let exe = std::env::current_exe()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let mut wslenv = std::env::var("WSLENV").unwrap_or_default();
+    for add in ["BADUHAN_PANE", "BADUHAN_EXE/p"] {
+        let base = add.split('/').next().unwrap_or(add);
+        if !wslenv.split(':').any(|e| e.split('/').next() == Some(base)) {
+            if !wslenv.is_empty() {
+                wslenv.push(':');
+            }
+            wslenv.push_str(add);
+        }
+    }
+    vec![
+        ("BADUHAN_PANE".into(), pane_id.to_string()),
+        ("BADUHAN_EXE".into(), exe),
+        ("WSLENV".into(), wslenv),
+    ]
+}
+
 pub struct TermPane {
     pub term: Arc<FairMutex<Term<EventProxy>>>,
     pub pty: Pty,
@@ -156,6 +180,7 @@ impl TermPane {
                 profile.cwd.as_deref(),
                 cols,
                 rows,
+                &ctl_env(pane_id),
                 move |bytes| {
                     let mut term = term.lock();
                     processor.advance(&mut *term, bytes);

@@ -60,6 +60,7 @@ impl Pty {
         cwd: Option<&str>,
         cols: u16,
         rows: u16,
+        extra_env: &[(String, String)],
         on_output: impl FnMut(&[u8]) + Send + 'static,
         on_exit: impl FnOnce() + Send + 'static,
     ) -> Result<Pty> {
@@ -80,6 +81,9 @@ impl Pty {
         }
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
+        for (k, v) in extra_env {
+            cmd.env(k, v);
+        }
 
         let mut child = pair.slave.spawn_command(cmd)?;
 

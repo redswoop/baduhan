@@ -605,6 +605,46 @@ impl TermWindow {
         DropTarget::Zone { target, dir, before, preview }
     }
 
+    /// Handle a `baduhan browse/reload/devtools` request from a shell pane.
+    /// Returns false when the pane isn't ours (caller tries other windows).
+    fn handle_ctl(&mut self, req: &crate::ctl::CtlReq) -> bool {
+        let Some(tab_idx) = self.tabs.iter().position(|t| t.find_pane_by_id(req.pane)) else {
+            return false;
+        };
+        let is_active_tab = tab_idx == self.active;
+        let tab = &mut self.tabs[tab_idx];
+        let browser = tab.panes.values_mut().find_map(|p| match &mut p.kind {
+            PaneKind::Browser(b) => Some(b),
+            _ => None,
+        });
+        match (req.verb.as_str(), browser) {
+            ("browse", Some(b)) => b.navigate(&req.arg),
+            ("browse", None) => {
+                // No browser in this tab yet: split one off the requesting
+                // pane, without stealing its focus.
+                let pane_id = app::next_id();
+                let url = browser_pane::normalize_url(&req.arg);
+                let mut b = BrowserPane::new(self.hwnd, pane_id, &url, self.edit_font);
+                if !is_active_tab {
+                    b.show(false);
+                }
+                if !pane_tree::split(&mut tab.root, req.pane, Dir::Row, pane_id) {
+                    return false;
+                }
+                tab.zoomed = None;
+                tab.panes.insert(pane_id, Pane { id: pane_id, kind: PaneKind::Browser(b) });
+            },
+            ("reload", Some(b)) => b.reload(),
+            ("devtools", Some(b)) => b.devtools(),
+            _ => return false,
+        }
+        if is_active_tab {
+            self.relayout();
+        }
+        self.invalidate();
+        true
+    }
+
     /// Move the active tab's pane `id` into its own new tab.
     fn pane_to_new_tab(&mut self, id: PaneId) {
         let Some(tab) = self.tabs.get_mut(self.active) else { return };
@@ -1895,6 +1935,23 @@ impl TermWindow {
                     SetBkColor(hdc, COLORREF(0x002A1E1E));
                 }
                 Some(LRESULT(self.edit_brush.0 as isize))
+            },
+            WM_COPYDATA => {
+                let cds = lparam.0 as *const windows::Win32::System::DataExchange::COPYDATASTRUCT;
+                if cds.is_null() {
+                    return Some(LRESULT(0));
+                }
+                let cds = unsafe { &*cds };
+                if cds.dwData != crate::ctl::CTL_MAGIC || cds.lpData.is_null() {
+                    return None; // not ours; other apps use WM_COPYDATA too
+                }
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(cds.lpData as *const u8, cds.cbData as usize)
+                };
+                let handled = serde_json::from_slice::<crate::ctl::CtlReq>(bytes)
+                    .map(|req| self.handle_ctl(&req))
+                    .unwrap_or(false);
+                Some(LRESULT(handled as isize))
             },
             WM_APP_TERM_DIRTY => {
                 self.invalidate();
