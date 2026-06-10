@@ -2,6 +2,7 @@
 
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Boundary, Column, Direction, Line, Point, Side};
+use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::search::{Match, RegexSearch};
 use alacritty_terminal::term::TermMode;
@@ -81,6 +82,20 @@ struct SearchUi {
     found: Option<Match>,
 }
 
+/// Quick-select hints state (Ctrl+Shift+Space overlay).
+struct HintsUi {
+    matches: Vec<crate::hints::HintMatch>,
+    typed: String,
+}
+
+/// Command palette state (Ctrl+Shift+P overlay).
+struct PaletteUi {
+    items: Vec<crate::command_palette::Item>,
+    query: String,
+    filtered: Vec<usize>,
+    selected: usize,
+}
+
 pub struct TermWindow {
     pub hwnd: HWND,
     gfx_win: Option<WindowGfx>,
@@ -94,6 +109,8 @@ pub struct TermWindow {
     /// Pane currently holding "terminal focus" (got \x1b[I last).
     focus_pane: Option<PaneId>,
     search: Option<SearchUi>,
+    hints: Option<HintsUi>,
+    palette: Option<PaletteUi>,
     drag: Drag,
     edit_font: HFONT,
     edit_brush: HBRUSH,
@@ -120,6 +137,8 @@ impl TermWindow {
             focused: true,
             focus_pane: None,
             search: None,
+            hints: None,
+            palette: None,
             drag: Drag::None,
             edit_font,
             edit_brush,
@@ -589,6 +608,8 @@ impl TermWindow {
             }
 
             self.draw_search_bar(win, &gfx);
+            self.draw_hints(win, &gfx);
+            self.draw_palette(win, &gfx);
         }
     }
 
@@ -1122,7 +1143,13 @@ impl TermWindow {
             return true;
         }
 
-        // Search bar swallows input while open.
+        // Modal overlays swallow input while open.
+        if self.palette.is_some() {
+            return self.palette_key(vk);
+        }
+        if self.hints.is_some() {
+            return self.hints_key(vk);
+        }
         if self.search.is_some() {
             return self.search_key(vk, &mods);
         }
@@ -1242,6 +1269,283 @@ impl TermWindow {
                 None,
                 None,
                 SW_SHOWNORMAL,
+            );
+        }
+    }
+
+    // ----- prompt marks (OSC 133) -------------------------------------------
+
+    /// Jump between shell prompts in scrollback. dir < 0 = older.
+    fn prompt_jump(&mut self, dir: i32) {
+        use std::sync::atomic::Ordering;
+        let Some(tab) = self.tabs.get(self.active) else { return };
+        let Some(t) = tab.active_term() else { return };
+        let lines_now = t.shared.lines_seen.load(Ordering::Relaxed);
+        let marks: Vec<u64> = t.shared.marks.lock().unwrap().iter().copied().collect();
+        if marks.is_empty() {
+            return;
+        }
+        let mut term = t.term.lock();
+        if term.mode().contains(TermMode::ALT_SCREEN) {
+            return;
+        }
+        let cur = term.grid().display_offset() as i64;
+        let cursor_row = term.grid().cursor.point.line.0 as i64;
+        let history = term.grid().history_size() as i64;
+        // A mark with clock M sits (lines_now - M) wrapped lines above the
+        // cursor; this display_offset puts it at the viewport top.
+        let offset_of = |m: u64| (lines_now.saturating_sub(m)) as i64 - cursor_row;
+        let target = if dir < 0 {
+            // Older: smallest reachable offset strictly above the current one.
+            marks
+                .iter()
+                .rev()
+                .map(|m| offset_of(*m))
+                .find(|o| *o > cur && *o <= history)
+        } else {
+            // Newer: largest offset strictly below the current one (offsets
+            // descend as marks get newer), else snap to the live bottom.
+            marks
+                .iter()
+                .map(|m| offset_of(*m))
+                .find(|o| *o < cur && *o >= 0)
+                .or(if cur > 0 { Some(0) } else { None })
+        };
+        if let Some(o) = target {
+            term.scroll_display(Scroll::Delta((o - cur) as i32));
+            drop(term);
+            self.invalidate();
+        }
+    }
+
+    // ----- quick-select hints -----------------------------------------------
+
+    fn open_hints(&mut self) {
+        let Some(tab) = self.tabs.get(self.active) else { return };
+        let Some(t) = tab.active_term() else { return };
+        let term = t.term.lock();
+        let display_offset = term.grid().display_offset() as i32;
+        let cols = term.grid().columns();
+        let lines = term.grid().screen_lines();
+        let mut rows: Vec<(String, Vec<usize>)> = Vec::with_capacity(lines);
+        for r in 0..lines {
+            let line = Line(r as i32 - display_offset);
+            let mut text = String::new();
+            let mut col_map = Vec::new();
+            for c in 0..cols {
+                let cell = &term.grid()[line][Column(c)];
+                if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                    continue;
+                }
+                col_map.push(c);
+                text.push(cell.c);
+            }
+            rows.push((text, col_map));
+        }
+        drop(term);
+        let matches = crate::hints::scan(&rows);
+        if matches.is_empty() {
+            return;
+        }
+        self.hints = Some(HintsUi { matches, typed: String::new() });
+        self.invalidate();
+    }
+
+    fn hints_key(&mut self, vk: u16) -> bool {
+        match VIRTUAL_KEY(vk) {
+            VK_ESCAPE => {
+                self.hints = None;
+                self.invalidate();
+            },
+            VK_BACK => {
+                if let Some(h) = &mut self.hints {
+                    h.typed.pop();
+                }
+                self.invalidate();
+            },
+            _ => {},
+        }
+        true
+    }
+
+    fn hints_char(&mut self, ch: char) {
+        let Some(h) = &mut self.hints else { return };
+        if !ch.is_ascii_graphic() {
+            return;
+        }
+        h.typed.push(ch.to_ascii_lowercase());
+        let typed = h.typed.clone();
+        let exact = h.matches.iter().find(|m| m.label == typed).map(|m| m.text.clone());
+        let any_prefix = h.matches.iter().any(|m| m.label.starts_with(&typed));
+        if let Some(text) = exact {
+            self.hints = None;
+            self.with_active_term(|t| t.pty.write(text.as_bytes()));
+        } else if !any_prefix {
+            self.hints = None;
+        }
+        self.invalidate();
+    }
+
+    fn draw_hints(&self, win: &WindowGfx, gfx: &crate::renderer::Gfx) {
+        let Some(h) = &self.hints else { return };
+        let Some(tab) = self.tabs.get(self.active) else { return };
+        let lay = tab.layout(self.pane_area());
+        let multi = lay.panes.len() > 1;
+        let Some(r) = lay.rect_of(tab.active) else { return };
+        let c = content_rect(r, multi);
+        let f = tab.fonts.as_ref().unwrap_or(&self.fonts);
+        for m in &h.matches {
+            if !m.label.starts_with(h.typed.as_str()) {
+                continue;
+            }
+            let x = c.x + PANE_PAD + m.col as f32 * f.cell_w;
+            let y = c.y + PANE_PAD + m.row as f32 * f.cell_h;
+            let w = 8.0 + m.label.len() as f32 * 8.0;
+            let chip = rf(x, y - 2.0, x + w, y + 16.0);
+            win.rounded(chip, 3.0, palette::d2d(palette::ACCENT));
+            win.text(
+                gfx,
+                &m.label,
+                &self.fonts.ui,
+                rf(chip.left + 4.0, chip.top, chip.right, chip.bottom),
+                palette::d2d(palette::rgb(0x10, 0x10, 0x18)),
+            );
+        }
+    }
+
+    // ----- command palette ---------------------------------------------------
+
+    fn open_palette(&mut self) {
+        let items = crate::command_palette::items(&app::config().profiles);
+        let filtered = crate::command_palette::filter(&items, "");
+        self.palette = Some(PaletteUi { items, query: String::new(), filtered, selected: 0 });
+        self.invalidate();
+    }
+
+    fn palette_refresh(&mut self) {
+        if let Some(p) = &mut self.palette {
+            p.filtered = crate::command_palette::filter(&p.items, &p.query);
+            p.selected = 0;
+        }
+        self.invalidate();
+    }
+
+    fn palette_key(&mut self, vk: u16) -> bool {
+        match VIRTUAL_KEY(vk) {
+            VK_ESCAPE => {
+                self.palette = None;
+                self.invalidate();
+            },
+            VK_UP => {
+                if let Some(p) = &mut self.palette {
+                    p.selected = p.selected.saturating_sub(1);
+                }
+                self.invalidate();
+            },
+            VK_DOWN => {
+                if let Some(p) = &mut self.palette {
+                    p.selected =
+                        (p.selected + 1).min(p.filtered.len().saturating_sub(1)).min(9);
+                }
+                self.invalidate();
+            },
+            VK_BACK => {
+                if let Some(p) = &mut self.palette {
+                    p.query.pop();
+                }
+                self.palette_refresh();
+            },
+            VK_RETURN => {
+                let action = self.palette.as_ref().and_then(|p| {
+                    p.filtered.get(p.selected).map(|i| p.items[*i].action)
+                });
+                self.palette = None;
+                self.invalidate();
+                if let Some(a) = action {
+                    self.run_palette_action(a);
+                }
+            },
+            _ => {},
+        }
+        true
+    }
+
+    fn palette_char(&mut self, ch: char) {
+        if ch < ' ' || ch == '\x7f' {
+            return;
+        }
+        if let Some(p) = &mut self.palette {
+            p.query.push(ch);
+        }
+        self.palette_refresh();
+    }
+
+    fn run_palette_action(&mut self, a: crate::command_palette::PaletteAction) {
+        use crate::command_palette::PaletteAction as A;
+        match a {
+            A::NewTabProfile(i) => self.new_tab_with_profile(i),
+            A::Split(dir) => self.split(dir, false),
+            A::BrowserSplit => self.split(Dir::Row, true),
+            A::ClosePane => self.close_active_pane(),
+            A::Zoom => self.zoom_toggle(),
+            A::DetachTab => self.detach_tab(self.active, None),
+            A::PaneToNewTab => {
+                if let Some(tab) = self.tabs.get(self.active) {
+                    self.pane_to_new_tab(tab.active);
+                }
+            },
+            A::NewWindow => app::create_window(None, None),
+            A::FontBigger => self.set_font_size(self.active_font_size() + 1.0),
+            A::FontSmaller => self.set_font_size(self.active_font_size() - 1.0),
+            A::FontReset => self.set_font_size(app::config().font_size),
+            A::Search => self.toggle_search(),
+            A::MoveTabLeft => self.move_tab(-1),
+            A::MoveTabRight => self.move_tab(1),
+            A::PromptPrev => self.prompt_jump(-1),
+            A::PromptNext => self.prompt_jump(1),
+            A::Hints => self.open_hints(),
+        }
+    }
+
+    fn draw_palette(&self, win: &WindowGfx, gfx: &crate::renderer::Gfx) {
+        let Some(p) = &self.palette else { return };
+        let (w, _) = self.client_dips();
+        let pw = 480.0_f32.min(w - 40.0);
+        let x0 = (w - pw) / 2.0;
+        let y0 = TABBAR_H + 10.0;
+        let row_h = 26.0;
+        let shown = p.filtered.len().min(10);
+        let box_h = 34.0 + shown as f32 * row_h + 6.0;
+        let bx = rf(x0, y0, x0 + pw, y0 + box_h);
+        win.rounded(bx, 6.0, palette::d2d_a(palette::CHROME_BG, 0.98));
+        win.frame(bx, palette::d2d_a(palette::ACCENT, 0.8), 1.0);
+        win.text(
+            gfx,
+            &format!("\u{276F} {}\u{2595}", p.query),
+            &self.fonts.ui,
+            rf(x0 + 12.0, y0 + 4.0, x0 + pw - 12.0, y0 + 30.0),
+            palette::d2d(palette::TAB_TEXT_ACTIVE),
+        );
+        for (vis, idx) in p.filtered.iter().take(10).enumerate() {
+            let item = &p.items[*idx];
+            let ry = y0 + 34.0 + vis as f32 * row_h;
+            let rr = rf(x0 + 4.0, ry, x0 + pw - 4.0, ry + row_h - 2.0);
+            if vis == p.selected {
+                win.rounded(rr, 4.0, palette::d2d_a(palette::ACCENT, 0.30));
+            }
+            win.text(
+                gfx,
+                &item.label,
+                &self.fonts.ui,
+                rf(rr.left + 8.0, rr.top, rr.right - 120.0, rr.bottom),
+                palette::d2d(palette::TAB_TEXT_ACTIVE),
+            );
+            win.text(
+                gfx,
+                item.hint,
+                &self.fonts.ui,
+                rf(rr.right - 150.0, rr.top, rr.right - 8.0, rr.bottom),
+                palette::d2d_a(palette::TAB_TEXT, 0.7),
             );
         }
     }
@@ -1472,6 +1776,7 @@ impl TermWindow {
                 b'C' => self.copy_selection(),
                 b'V' => self.paste(),
                 b'F' => self.toggle_search(),
+                b'P' => self.open_palette(),
                 c @ b'1'..=b'9' => {
                     // New tab with profile N (Windows Terminal muscle memory).
                     self.new_tab_with_profile((c - b'1') as usize);
@@ -1484,6 +1789,9 @@ impl TermWindow {
                     VK_PRIOR => self.move_tab(-1),
                     VK_NEXT => self.move_tab(1),
                     VK_RETURN => self.zoom_toggle(),
+                    VK_UP => self.prompt_jump(-1),
+                    VK_DOWN => self.prompt_jump(1),
+                    VK_SPACE => self.open_hints(),
                     _ => return false,
                 },
             }
@@ -1576,6 +1884,18 @@ impl TermWindow {
         }
         // Handled in WM_KEYDOWN already.
         if matches!(code, 0x0d | 0x09 | 0x08 | 0x1b) {
+            return;
+        }
+        if self.palette.is_some() {
+            if let Some(ch) = char::from_u32(code as u32) {
+                self.palette_char(ch);
+            }
+            return;
+        }
+        if self.hints.is_some() {
+            if let Some(ch) = char::from_u32(code as u32) {
+                self.hints_char(ch);
+            }
             return;
         }
         // Search bar edits its query instead of feeding the shell.
@@ -2445,6 +2765,8 @@ impl TermWindow {
                         }
                     },
                     15 => self.toggle_search(),
+                    16 => self.open_palette(),
+                    17 => self.open_hints(),
                     14 => {
                         // Simulate a file drop on the active pane's center;
                         // lparam: 0 paste, 1 copy, 2 move.

@@ -6,9 +6,11 @@
 
 mod app;
 mod browser_pane;
+mod command_palette;
 mod config;
 mod ctl;
 mod dragdrop;
+mod hints;
 mod keys;
 mod palette;
 mod pane_tree;

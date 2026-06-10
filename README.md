@@ -91,6 +91,10 @@ proportional.
 | Mouse selection | Copy-on-select; double-click selects a word |
 | Right-click | Copy selection if any, else paste |
 | `Ctrl+Shift+F` | Search scrollback (regex; prefills from selection). `Enter`/`↑` older, `Shift+Enter`/`↓` newer, `Esc` closes |
+| `Ctrl+Shift+P` | **Command palette** — fuzzy-search every action |
+| `Ctrl+Shift+↑` / `↓` | Jump to previous / next shell prompt (needs OSC 133 marks, see below) |
+| `Ctrl+Shift+Space` | **Quick select** — labels every URL/path/hash on screen; type a label to paste it |
+| `Ctrl+click` | Open URL under cursor (OSC 8 hyperlinks or plain text) |
 | `Shift+PgUp` / `Shift+PgDn` | Scrollback paging |
 | `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | Font size bigger / smaller / reset |
 | `Ctrl+wheel` | Font zoom |
@@ -147,9 +151,10 @@ path-pasting rather than guessing. WSL directories resolve through
 `\\wsl$\<distro>\…`, so Ctrl+drop can copy straight into Linux.
 
 ```bash
-# .bashrc / .zshrc — let baduhan (and other terminals) track your cwd:
-PROMPT_COMMAND='printf "\e]7;file://%s%s\e\\" "$HOSTNAME" "$PWD"'   # bash
-precmd() { printf '\e]7;file://%s%s\e\\' "$HOST" "$PWD" }            # zsh
+# .bashrc / .zshrc — shell integration: cwd tracking (OSC 7, for drag&drop
+# copy/move) and prompt marks (OSC 133, for Ctrl+Shift+↑/↓ prompt jumping):
+PROMPT_COMMAND='printf "\e]7;file://%s%s\e\\\e]133;A\e\\" "$HOSTNAME" "$PWD"'  # bash
+precmd() { printf '\e]7;file://%s%s\e\\\e]133;A\e\\' "$HOST" "$PWD" }          # zsh
 ```
 
 ## The dev browser

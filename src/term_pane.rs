@@ -33,6 +33,10 @@ pub struct PaneShared {
     /// Shell-reported cwd via OSC 7, already translated to a Windows path
     /// (`C:\…` or `\\wsl$\…`). Beats the PEB fallback when present.
     pub osc7_cwd: Mutex<Option<String>>,
+    /// Total newlines ever emitted (the pane's monotonic line clock).
+    pub lines_seen: std::sync::atomic::AtomicU64,
+    /// OSC 133;A prompt-start marks, as `lines_seen` values (newest last).
+    pub marks: Mutex<std::collections::VecDeque<u64>>,
 }
 
 impl PaneShared {
@@ -205,6 +209,36 @@ pub fn scan_osc7(bytes: &[u8]) -> Option<String> {
     found
 }
 
+/// Maintain the pane's line clock and OSC 133;A prompt marks. The clock
+/// counts newlines in the output stream; a mark records the clock value at
+/// each prompt start, giving scrollback jumps a stable-enough coordinate
+/// (drifts after reflow-on-resize, which is acceptable).
+fn scan_lines_and_marks(bytes: &[u8], shared: &PaneShared) {
+    use std::sync::atomic::Ordering;
+    let mut lines = shared.lines_seen.load(Ordering::Relaxed);
+    let mut new_marks: Vec<u64> = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\n' => lines += 1,
+            0x1b if bytes[i + 1..].starts_with(b"]133;A") => {
+                new_marks.push(lines);
+                i += 6;
+            },
+            _ => {},
+        }
+        i += 1;
+    }
+    shared.lines_seen.store(lines, Ordering::Relaxed);
+    if !new_marks.is_empty() {
+        let mut marks = shared.marks.lock().unwrap();
+        marks.extend(new_marks);
+        while marks.len() > 500 {
+            marks.pop_front();
+        }
+    }
+}
+
 fn percent_decode(s: &str) -> String {
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
@@ -292,6 +326,8 @@ impl TermPane {
             }),
             writer: Mutex::new(None),
             osc7_cwd: Mutex::new(None),
+            lines_seen: std::sync::atomic::AtomicU64::new(0),
+            marks: Mutex::new(std::collections::VecDeque::new()),
         });
 
         let proxy = EventProxy(shared.clone());
@@ -327,6 +363,7 @@ impl TermPane {
                     {
                         *shared_cwd.osc7_cwd.lock().unwrap() = Some(path);
                     }
+                    scan_lines_and_marks(bytes, &shared_cwd);
                     let mut term = term.lock();
                     processor.advance(&mut *term, bytes);
                     drop(term);
