@@ -102,6 +102,29 @@ proportional.
 | `Enter` in URL bar | Navigate — bare words search, `localhost:…` gets `http://` |
 | Toolbar `✕` | Close the browser pane |
 
+## Drag & drop
+
+Drop files from Explorer onto a pane:
+
+| Gesture | Action |
+|---|---|
+| Drop | Paste the path, quoted for the pane's shell (`"C:\…"` for pwsh/cmd, `'C:/…'` for git-bash, `'/mnt/c/…'` for WSL) |
+| `Ctrl`+drop | **Copy** the files into the shell's *current* directory |
+| `Shift`+drop | **Move** them there (undo-able, Explorer semantics) |
+| Drop on a browser pane | Open the file |
+
+The target directory follows your `cd`s: pwsh/cmd report it via the process
+itself; bash/zsh/WSL shells report it via the OSC 7 escape (one line of
+shell config — see below). Without OSC 7, copy/move gracefully degrade to
+path-pasting rather than guessing. WSL directories resolve through
+`\\wsl$\<distro>\…`, so Ctrl+drop can copy straight into Linux.
+
+```bash
+# .bashrc / .zshrc — let baduhan (and other terminals) track your cwd:
+PROMPT_COMMAND='printf "\e]7;file://%s%s\e\\" "$HOSTNAME" "$PWD"'   # bash
+precmd() { printf '\e]7;file://%s%s\e\\' "$HOST" "$PWD" }            # zsh
+```
+
 ## The dev browser
 
 The browser pane is built to sit next to your dev server — and to be driven

@@ -8,6 +8,7 @@ mod app;
 mod browser_pane;
 mod config;
 mod ctl;
+mod dragdrop;
 mod keys;
 mod palette;
 mod pane_tree;
@@ -18,7 +19,6 @@ mod term_pane;
 mod vt_tests;
 mod window;
 
-use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, GetMessageW, TranslateMessage, MSG,
 };
@@ -31,7 +31,9 @@ fn main() {
     }
 
     unsafe {
-        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        // OleInitialize (STA + OLE) rather than plain COM init: drag & drop
+        // registration requires it.
+        let _ = windows::Win32::System::Ole::OleInitialize(None);
     }
 
     // Load config (and activate the color scheme) before any window exists.

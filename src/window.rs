@@ -23,6 +23,8 @@ use crate::term_pane::{
 };
 
 pub const WM_APP_DUMP_FRAME: u32 = WM_APP + 9;
+/// wparam = Box<(Vec<String>, DropOp, POINT)> from the OLE drop handler.
+pub const WM_APP_DROP_FILES: u32 = WM_APP + 11;
 #[cfg(debug_assertions)]
 pub const WM_APP_DEBUG_ACTION: u32 = WM_APP + 10;
 
@@ -603,6 +605,81 @@ impl TermWindow {
             (Dir::Col, false) => RectF { x: r.x, y: r.y + r.h / 2.0, w: r.w, h: r.h / 2.0 },
         };
         DropTarget::Zone { target, dir, before, preview }
+    }
+
+    /// Drop-effect feedback for OLE drag-over: what would happen here?
+    pub fn drop_effect_at(
+        &self,
+        px: i32,
+        py: i32,
+        op: crate::dragdrop::DropOp,
+    ) -> windows::Win32::System::Ole::DROPEFFECT {
+        use windows::Win32::System::Ole::*;
+        let s = self.scale();
+        let (x, y) = (px as f32 / s, py as f32 / s);
+        let Some((pane_id, _)) = self.pane_at(x, y) else { return DROPEFFECT_NONE };
+        match self.tabs.get(self.active).and_then(|t| t.pane(pane_id)).map(|p| &p.kind) {
+            Some(PaneKind::Browser(_)) => DROPEFFECT_COPY, // open the file
+            Some(PaneKind::Term(t)) => {
+                // Copy/move need a knowable cwd; WSL shells get path-paste.
+                if op != crate::dragdrop::DropOp::PastePath
+                    && t.flavor == crate::term_pane::ShellFlavor::Wsl
+                {
+                    DROPEFFECT_LINK
+                } else {
+                    match op {
+                        crate::dragdrop::DropOp::PastePath => DROPEFFECT_LINK,
+                        crate::dragdrop::DropOp::Copy => DROPEFFECT_COPY,
+                        crate::dragdrop::DropOp::Move => DROPEFFECT_MOVE,
+                    }
+                }
+            },
+            None => DROPEFFECT_NONE,
+        }
+    }
+
+    /// Execute a completed file drop (posted from the OLE handler).
+    fn do_drop(&mut self, paths: Vec<String>, op: crate::dragdrop::DropOp, p: POINT) {
+        use crate::dragdrop::DropOp;
+        let s = self.scale();
+        let (x, y) = (p.x as f32 / s, p.y as f32 / s);
+        let Some((pane_id, _)) = self.pane_at(x, y) else { return };
+        if let Some(tab) = self.tabs.get_mut(self.active)
+            && tab.active != pane_id {
+                tab.active = pane_id;
+                self.sync_pane_focus();
+                self.update_title();
+            }
+        let hwnd = self.hwnd;
+        let Some(tab) = self.tabs.get_mut(self.active) else { return };
+        match tab.pane_mut(pane_id).map(|p| &mut p.kind) {
+            Some(PaneKind::Browser(b)) => {
+                let url = format!("file:///{}", paths[0].replace('\\', "/"));
+                b.navigate(&url);
+            },
+            Some(PaneKind::Term(t)) => {
+                let mut op = op;
+                let cwd = if op == DropOp::PastePath { None } else { t.cwd() };
+                if op != DropOp::PastePath && cwd.is_none() {
+                    op = DropOp::PastePath; // WSL / unreadable cwd: degrade
+                }
+                match op {
+                    DropOp::PastePath => {
+                        let mut text = String::new();
+                        for p in &paths {
+                            text.push_str(&quote_path(p, t.flavor));
+                            text.push(' ');
+                        }
+                        t.pty.write(text.as_bytes());
+                    },
+                    DropOp::Copy | DropOp::Move => {
+                        shell_file_op(hwnd, &paths, &cwd.unwrap(), op == DropOp::Move);
+                    },
+                }
+            },
+            None => {},
+        }
+        self.invalidate();
     }
 
     /// Handle a `baduhan browse/reload/devtools` request from a shell pane.
@@ -1775,11 +1852,26 @@ impl TermWindow {
     pub fn message(&mut self, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
         match msg {
             WM_CREATE => {
+                crate::dragdrop::register(self.hwnd);
                 if let Some(tab) = self.pending_tab.take() {
                     self.adopt_tab(tab, None);
                 } else {
                     self.new_tab();
                 }
+                Some(LRESULT(0))
+            },
+            WM_DESTROY => {
+                crate::dragdrop::revoke(self.hwnd);
+                None
+            },
+            WM_APP_DROP_FILES => {
+                let payload = unsafe {
+                    Box::from_raw(
+                        wparam.0 as *mut (Vec<String>, crate::dragdrop::DropOp, POINT),
+                    )
+                };
+                let (paths, op, pt) = *payload;
+                self.do_drop(paths, op, pt);
                 Some(LRESULT(0))
             },
             WM_PAINT => {
@@ -2016,6 +2108,32 @@ impl TermWindow {
                             self.pane_to_new_tab(tab.active);
                         }
                     },
+                    14 => {
+                        // Simulate a file drop on the active pane's center;
+                        // lparam: 0 paste, 1 copy, 2 move.
+                        let op = match lparam.0 {
+                            1 => crate::dragdrop::DropOp::Copy,
+                            2 => crate::dragdrop::DropOp::Move,
+                            _ => crate::dragdrop::DropOp::PastePath,
+                        };
+                        let test_file = std::env::temp_dir().join("bdh-drop-test.txt");
+                        let lay = self
+                            .tabs
+                            .get(self.active)
+                            .map(|t| t.layout(self.pane_area()));
+                        if let Some(lay) = lay
+                            && let Some(r) = lay.rect_of(self.tabs[self.active].active)
+                        {
+                            let s = self.scale();
+                            let (cx, cy) = r.center();
+                            let p = POINT { x: (cx * s) as i32, y: (cy * s) as i32 };
+                            self.do_drop(
+                                vec![test_file.to_string_lossy().into_owned()],
+                                op,
+                                p,
+                            );
+                        }
+                    },
                     _ => {},
                 }
                 Some(LRESULT(0))
@@ -2078,6 +2196,52 @@ fn loword(v: u32) -> u16 {
 
 fn hiword(v: u32) -> u16 {
     ((v >> 16) & 0xffff) as u16
+}
+
+/// Quote a Windows path for the target shell flavor.
+fn quote_path(path: &str, flavor: crate::term_pane::ShellFlavor) -> String {
+    use crate::term_pane::ShellFlavor;
+    match flavor {
+        ShellFlavor::Windows => format!("\"{path}\""),
+        ShellFlavor::Posix => format!("'{}'", path.replace('\\', "/").replace('\'', "'\\''")),
+        ShellFlavor::Wsl => {
+            let p = path.replace('\\', "/");
+            let translated = match p.as_bytes() {
+                [d @ b'A'..=b'Z', b':', ..] | [d @ b'a'..=b'z', b':', ..] => {
+                    format!("/mnt/{}{}", (*d as char).to_ascii_lowercase(), &p[2..])
+                },
+                _ => p,
+            };
+            format!("'{}'", translated.replace('\'', "'\\''"))
+        },
+    }
+}
+
+/// Explorer-style copy/move into `dest` with undo support and progress UI.
+fn shell_file_op(hwnd: HWND, paths: &[String], dest: &str, mv: bool) {
+    use windows::Win32::UI::Shell::{
+        SHFileOperationW, FOF_ALLOWUNDO, FOF_NOCONFIRMMKDIR, FO_COPY, FO_MOVE, SHFILEOPSTRUCTW,
+    };
+    // Double-null-terminated lists.
+    let mut from: Vec<u16> = Vec::new();
+    for p in paths {
+        from.extend(p.encode_utf16());
+        from.push(0);
+    }
+    from.push(0);
+    let mut to: Vec<u16> = dest.encode_utf16().collect();
+    to.extend([0, 0]);
+    let mut op = SHFILEOPSTRUCTW {
+        hwnd,
+        wFunc: if mv { FO_MOVE } else { FO_COPY },
+        pFrom: windows::core::PCWSTR(from.as_ptr()),
+        pTo: windows::core::PCWSTR(to.as_ptr()),
+        fFlags: (FOF_ALLOWUNDO.0 | FOF_NOCONFIRMMKDIR.0) as u16,
+        ..Default::default()
+    };
+    unsafe {
+        let _ = SHFileOperationW(&mut op);
+    }
 }
 
 fn make_edit_font(dpi: f32) -> HFONT {

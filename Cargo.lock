@@ -99,6 +99,7 @@ dependencies = [
  "serde_json",
  "webview2-com",
  "windows",
+ "windows-core",
  "windows-numerics",
 ]
 
