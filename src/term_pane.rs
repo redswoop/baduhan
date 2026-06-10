@@ -77,10 +77,13 @@ impl EventListener for EventProxy {
                 self.0.pty_write(&s);
             },
             Event::ColorRequest(idx, fmt) => {
-                let color = if idx < 256 {
-                    palette::indexed(idx as u8)
-                } else {
-                    palette::DEFAULT_FG
+                let sch = palette::scheme();
+                let color = match idx {
+                    0..256 => palette::indexed(idx as u8),
+                    256 => sch.fg,     // NamedColor::Foreground
+                    257 => sch.bg,     // NamedColor::Background
+                    258 => sch.cursor, // NamedColor::Cursor
+                    _ => sch.fg,
                 };
                 let s = fmt(color);
                 self.0.pty_write(&s);
@@ -106,10 +109,18 @@ pub struct TermPane {
     pub term: Arc<FairMutex<Term<EventProxy>>>,
     pub pty: Pty,
     pub shared: Arc<PaneShared>,
+    /// Shown as the tab title until the shell sets one via OSC.
+    pub profile_name: String,
 }
 
 impl TermPane {
-    pub fn spawn(hwnd: HWND, pane_id: u64, shell: &str, cols: u16, rows: u16) -> Result<TermPane> {
+    pub fn spawn(
+        hwnd: HWND,
+        pane_id: u64,
+        profile: &crate::config::Profile,
+        cols: u16,
+        rows: u16,
+    ) -> Result<TermPane> {
         let shared = Arc::new(PaneShared {
             hwnd: AtomicIsize::new(hwnd.0 as isize),
             pane_id,
@@ -137,8 +148,8 @@ impl TermPane {
             let proxy_exit = proxy.clone();
             let mut processor: Processor = Processor::new();
             Pty::spawn(
-                shell,
-                None,
+                &profile.command,
+                profile.cwd.as_deref(),
                 cols,
                 rows,
                 move |bytes| {
@@ -155,7 +166,7 @@ impl TermPane {
 
         *shared.writer.lock().unwrap() = Some(pty.writer.clone());
 
-        Ok(TermPane { term, pty, shared })
+        Ok(TermPane { term, pty, shared, profile_name: profile.name.clone() })
     }
 
     pub fn resize(&self, cols: u16, rows: u16, cell_w: u16, cell_h: u16) {
@@ -171,7 +182,8 @@ impl TermPane {
     }
 
     pub fn title(&self) -> String {
-        self.shared.title.lock().unwrap().clone()
+        let t = self.shared.title.lock().unwrap().clone();
+        if t.is_empty() { self.profile_name.clone() } else { t }
     }
 
     /// Re-target dirty/event notifications when the pane moves to another window.

@@ -10,6 +10,7 @@ use windows::Win32::Foundation::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
+use crate::config::Config;
 use crate::renderer::Gfx;
 use crate::tabs::Tab;
 use crate::window::TermWindow;
@@ -19,7 +20,7 @@ pub const WIN_CLASS: PCWSTR = w!("BaduhanMainWindow");
 thread_local! {
     static GFX: RefCell<Option<Rc<Gfx>>> = const { RefCell::new(None) };
     static WINDOWS: RefCell<Vec<isize>> = const { RefCell::new(Vec::new()) };
-    static SHELL: RefCell<Option<Rc<String>>> = const { RefCell::new(None) };
+    static CONFIG: RefCell<Option<Rc<Config>>> = const { RefCell::new(None) };
 }
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -36,19 +37,14 @@ pub fn gfx() -> Rc<Gfx> {
     })
 }
 
-pub fn shell() -> Rc<String> {
-    SHELL.with(|s| {
-        s.borrow_mut()
+/// Load (once) and return the user config; also activates the color scheme.
+pub fn config() -> Rc<Config> {
+    CONFIG.with(|c| {
+        c.borrow_mut()
             .get_or_insert_with(|| {
-                // Prefer PowerShell 7 when on PATH, else Windows PowerShell.
-                let path = std::env::var("PATH").unwrap_or_default();
-                for dir in path.split(';') {
-                    let p = std::path::Path::new(dir.trim()).join("pwsh.exe");
-                    if p.is_file() {
-                        return Rc::new(p.to_string_lossy().into_owned());
-                    }
-                }
-                Rc::new("powershell.exe".to_string())
+                let cfg = Config::load_or_create();
+                crate::palette::set_scheme(cfg.scheme());
+                Rc::new(cfg)
             })
             .clone()
     })

@@ -6,6 +6,7 @@
 
 mod app;
 mod browser_pane;
+mod config;
 mod keys;
 mod palette;
 mod pane_tree;
@@ -13,6 +14,7 @@ mod pty;
 mod renderer;
 mod tabs;
 mod term_pane;
+mod vt_tests;
 mod window;
 
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
@@ -24,6 +26,9 @@ fn main() {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
     }
+
+    // Load config (and activate the color scheme) before any window exists.
+    let _ = app::config();
 
     app::register_class();
     app::create_window(None, None);

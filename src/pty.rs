@@ -52,16 +52,18 @@ pub struct Pty {
 }
 
 impl Pty {
-    /// Spawn `shell` in a fresh ConPTY. `on_output` runs on a background
-    /// reader thread for every chunk; `on_exit` runs once when the child dies.
+    /// Spawn `command` (argv: exe + args) in a fresh ConPTY. `on_output` runs
+    /// on a background reader thread for every chunk; `on_exit` runs once
+    /// when the child dies.
     pub fn spawn(
-        shell: &str,
+        command: &[String],
         cwd: Option<&str>,
         cols: u16,
         rows: u16,
         on_output: impl FnMut(&[u8]) + Send + 'static,
         on_exit: impl FnOnce() + Send + 'static,
     ) -> Result<Pty> {
+        anyhow::ensure!(!command.is_empty(), "empty command");
         let pair = native_pty_system().openpty(PtySize {
             rows,
             cols,
@@ -69,7 +71,8 @@ impl Pty {
             pixel_height: 0,
         })?;
 
-        let mut cmd = CommandBuilder::new(shell);
+        let mut cmd = CommandBuilder::new(&command[0]);
+        cmd.args(&command[1..]);
         if let Some(cwd) = cwd {
             cmd.cwd(cwd);
         } else if let Some(home) = std::env::var_os("USERPROFILE") {

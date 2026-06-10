@@ -20,17 +20,47 @@ to your dev server — in a small, fast, native package.
 | Language | Rust — single native exe, no runtime/VM |
 | PTY | ConPTY via `portable-pty`, one pseudo-console per pane |
 | Process management | Win32 **job object** per pane (`KILL_ON_JOB_CLOSE`) — closing a pane reliably kills the entire child process tree |
-| VT emulation | `alacritty_terminal` — Alacritty's production emulator: truecolor, 256-color, alt screen, scroll regions, SGR mouse, bracketed paste, OSC titles |
+| VT emulation | `alacritty_terminal` — Alacritty's production emulator: truecolor, 256-color, alt screen, scroll regions, SGR mouse, bracketed paste, OSC titles, synchronized updates (mode 2026), styled/colored underlines, OSC 8 hyperlinks — pinned by a [VT conformance test battery](src/vt_tests.rs) |
 | Rendering | Direct2D + DirectWrite (GPU), per-monitor-v2 DPI native |
 | Browser panes | WebView2 (Edge) child HWNDs; `SetParentWindow` moves them across windows **without reloading** |
 | UI | Custom-drawn tab bar, pane tree, dividers — no framework |
+
+## Configuration
+
+Settings live at `%APPDATA%\baduhan\settings.json`. On first run baduhan
+**imports your Windows Terminal settings** — default font (Nerd Fonts work
+out of the box), color scheme, and profiles, including dynamic-source
+profiles like Git Bash (resolved through WT fragment files) and WSL distros
+(synthesized as `wsl.exe -d <name>`). If Windows Terminal isn't installed,
+profiles are auto-detected: PowerShell 7, Windows PowerShell, cmd, Git Bash,
+and every registered WSL distro. Delete the file to re-import.
+
+```jsonc
+{
+  "font_family": "JetBrainsMonoNL Nerd Font",
+  "font_size": 13.0,
+  "dim_inactive_panes": 0.22,          // 0.0 disables split dimming
+  "default_profile": "Git Bash",
+  "profiles": [
+    { "name": "Git Bash", "command": ["C:\\Program Files\\Git\\bin\\bash.exe", "-i", "-l"] },
+    { "name": "Ubuntu",   "command": ["wsl.exe", "-d", "Ubuntu", "--cd", "~"] }
+  ],
+  "scheme": { "foreground": "#CCCCCC", "background": "#0C0C14", "ansi": ["#0C0C0C", "…16 entries"] }
+}
+```
+
+Unknown font families fall back to Cascadia Mono → Consolas (with a stderr
+note) instead of letting DirectWrite silently substitute something
+proportional.
 
 ## Hotkeys
 
 ### Tabs
 | Keys | Action |
 |---|---|
-| `Ctrl+Shift+T` | New tab |
+| `Ctrl+Shift+T` | New tab (default profile) |
+| `Ctrl+Shift+1` … `Ctrl+Shift+9` | New tab with profile N |
+| Right-click tab bar | Profile menu |
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous tab |
 | `Ctrl+1` … `Ctrl+8` | Jump to tab N |
 | `Ctrl+9` | Jump to last tab |
@@ -58,6 +88,7 @@ to your dev server — in a small, fast, native package.
 | Right-click | Copy selection if any, else paste |
 | `Shift+PgUp` / `Shift+PgDn` | Scrollback paging |
 | `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | Font size bigger / smaller / reset |
+| `Ctrl+wheel` | Font zoom |
 
 ### Browser panes
 | Keys | Action |
@@ -81,8 +112,6 @@ cargo test
 Requires Rust 1.88+ and Windows 10 1809+ (for ConPTY). The browser pane needs
 the WebView2 runtime, which ships with Windows 11 and Edge.
 
-Default shell: `pwsh.exe` from PATH, falling back to Windows PowerShell.
-
 ## Architecture notes
 
 - All windows share one UI thread. Tabs own their panes, so moving a tab
@@ -93,7 +122,11 @@ Default shell: `pwsh.exe` from PATH, falling back to Windows PowerShell.
   A separate thread waits on the child process for exit detection (ConPTY's
   output pipe deliberately does not EOF when the child exits).
 - The renderer batches grid cells into style runs and draws with
-  `DrawTextLayout` + color-font support, so emoji render in color.
+  `DrawTextLayout` + color-font support, so emoji render in color. Underline
+  styles get real geometry: sine-wave undercurls, dotted/dashed runs, and
+  SGR 58 underline colors.
+- Focus reporting (mode 1004) tracks the focused *pane*, not just the window:
+  switching splits sends `CSI I`/`CSI O` to the panes gaining/losing focus.
 
 ### Debug hooks (debug builds)
 
@@ -102,7 +135,8 @@ Default shell: `pwsh.exe` from PATH, falling back to Windows PowerShell.
   renders the same frame into a WIC bitmap instead).
 - `WM_APP+10` wparam=N drives actions programmatically: 1 split-right,
   2 split-down, 3 new-tab, 4 browser-split, 5 next-tab, 6 zoom, 7 close-pane,
-  8/9 focus right/left, 10 detach-tab, 11 font+.
+  8/9 focus right/left, 10 detach-tab, 11 font+, 12 new-tab-with-profile
+  (lparam = profile index).
 
 ## License
 

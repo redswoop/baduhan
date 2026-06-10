@@ -1,11 +1,39 @@
 //! Color scheme and ANSI palette resolution.
 
+use std::sync::OnceLock;
+
 use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
 use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
 
 pub const fn rgb(r: u8, g: u8, b: u8) -> Rgb {
     Rgb { r, g, b }
+}
+
+/// The active color scheme. Set once at startup (before any panes spawn);
+/// read from the UI thread and from PTY reader threads (OSC color queries).
+#[derive(Clone, Copy)]
+pub struct Scheme {
+    pub ansi: [Rgb; 16],
+    pub fg: Rgb,
+    pub bg: Rgb,
+    pub cursor: Rgb,
+}
+
+impl Scheme {
+    pub fn campbell() -> Scheme {
+        Scheme { ansi: ANSI, fg: DEFAULT_FG, bg: DEFAULT_BG, cursor: DEFAULT_FG }
+    }
+}
+
+static SCHEME: OnceLock<Scheme> = OnceLock::new();
+
+pub fn set_scheme(s: Scheme) {
+    let _ = SCHEME.set(s);
+}
+
+pub fn scheme() -> Scheme {
+    SCHEME.get().copied().unwrap_or_else(Scheme::campbell)
 }
 
 // Campbell (Windows Terminal default scheme), tweaked background.
@@ -44,7 +72,7 @@ pub const TOOLBAR_BG: Rgb = rgb(0x1A, 0x1A, 0x26);
 /// 256-color xterm palette entry for indices 16..=255.
 pub fn indexed(idx: u8) -> Rgb {
     if idx < 16 {
-        return ANSI[idx as usize];
+        return scheme().ansi[idx as usize];
     }
     if idx < 232 {
         let i = idx as u32 - 16;
@@ -70,36 +98,37 @@ fn named(name: NamedColor, colors: &Colors) -> Rgb {
     if let Some(c) = colors[name as usize] {
         return c;
     }
+    let s = scheme();
     match name {
-        NamedColor::Foreground => DEFAULT_FG,
-        NamedColor::Background => DEFAULT_BG,
-        NamedColor::Cursor => DEFAULT_FG,
-        NamedColor::BrightForeground => rgb(0xF2, 0xF2, 0xF2),
-        NamedColor::DimForeground => rgb(0x80, 0x80, 0x80),
-        NamedColor::Black => ANSI[0],
-        NamedColor::Red => ANSI[1],
-        NamedColor::Green => ANSI[2],
-        NamedColor::Yellow => ANSI[3],
-        NamedColor::Blue => ANSI[4],
-        NamedColor::Magenta => ANSI[5],
-        NamedColor::Cyan => ANSI[6],
-        NamedColor::White => ANSI[7],
-        NamedColor::BrightBlack => ANSI[8],
-        NamedColor::BrightRed => ANSI[9],
-        NamedColor::BrightGreen => ANSI[10],
-        NamedColor::BrightYellow => ANSI[11],
-        NamedColor::BrightBlue => ANSI[12],
-        NamedColor::BrightMagenta => ANSI[13],
-        NamedColor::BrightCyan => ANSI[14],
-        NamedColor::BrightWhite => ANSI[15],
-        NamedColor::DimBlack => dim(ANSI[0]),
-        NamedColor::DimRed => dim(ANSI[1]),
-        NamedColor::DimGreen => dim(ANSI[2]),
-        NamedColor::DimYellow => dim(ANSI[3]),
-        NamedColor::DimBlue => dim(ANSI[4]),
-        NamedColor::DimMagenta => dim(ANSI[5]),
-        NamedColor::DimCyan => dim(ANSI[6]),
-        NamedColor::DimWhite => dim(ANSI[7]),
+        NamedColor::Foreground => s.fg,
+        NamedColor::Background => s.bg,
+        NamedColor::Cursor => s.cursor,
+        NamedColor::BrightForeground => s.ansi[15],
+        NamedColor::DimForeground => dim(s.fg),
+        NamedColor::Black => s.ansi[0],
+        NamedColor::Red => s.ansi[1],
+        NamedColor::Green => s.ansi[2],
+        NamedColor::Yellow => s.ansi[3],
+        NamedColor::Blue => s.ansi[4],
+        NamedColor::Magenta => s.ansi[5],
+        NamedColor::Cyan => s.ansi[6],
+        NamedColor::White => s.ansi[7],
+        NamedColor::BrightBlack => s.ansi[8],
+        NamedColor::BrightRed => s.ansi[9],
+        NamedColor::BrightGreen => s.ansi[10],
+        NamedColor::BrightYellow => s.ansi[11],
+        NamedColor::BrightBlue => s.ansi[12],
+        NamedColor::BrightMagenta => s.ansi[13],
+        NamedColor::BrightCyan => s.ansi[14],
+        NamedColor::BrightWhite => s.ansi[15],
+        NamedColor::DimBlack => dim(s.ansi[0]),
+        NamedColor::DimRed => dim(s.ansi[1]),
+        NamedColor::DimGreen => dim(s.ansi[2]),
+        NamedColor::DimYellow => dim(s.ansi[3]),
+        NamedColor::DimBlue => dim(s.ansi[4]),
+        NamedColor::DimMagenta => dim(s.ansi[5]),
+        NamedColor::DimCyan => dim(s.ansi[6]),
+        NamedColor::DimWhite => dim(s.ansi[7]),
     }
 }
 

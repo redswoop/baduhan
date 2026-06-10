@@ -52,6 +52,8 @@ pub struct TermWindow {
     pub tabs: Vec<Tab>,
     pub active: usize,
     focused: bool,
+    /// Pane currently holding "terminal focus" (got \x1b[I last).
+    focus_pane: Option<PaneId>,
     drag: Drag,
     edit_font: HFONT,
     edit_brush: HBRUSH,
@@ -64,8 +66,9 @@ impl TermWindow {
     pub fn new(hwnd: HWND, pending_tab: Option<Tab>) -> TermWindow {
         let dpi = unsafe { GetDpiForWindow(hwnd) } as f32;
         let dpi = if dpi <= 0.0 { 96.0 } else { dpi };
-        let font_size = 13.0;
-        let fonts = FontSet::new(&app::gfx(), font_size).expect("fonts");
+        let cfg = app::config();
+        let font_size = cfg.font_size;
+        let fonts = FontSet::new(&app::gfx(), &cfg.font_family, font_size).expect("fonts");
         let edit_font = make_edit_font(dpi);
         let edit_brush = unsafe { CreateSolidBrush(COLORREF(0x002A1E1E)) };
         TermWindow {
@@ -77,6 +80,7 @@ impl TermWindow {
             tabs: Vec::new(),
             active: 0,
             focused: true,
+            focus_pane: None,
             drag: Drag::None,
             edit_font,
             edit_brush,
@@ -127,19 +131,65 @@ impl TermWindow {
     }
 
     pub fn new_tab(&mut self) {
+        let cfg = app::config();
+        self.new_tab_with(cfg.default_profile());
+    }
+
+    pub fn new_tab_with_profile(&mut self, idx: usize) {
+        let cfg = app::config();
+        if let Some(profile) = cfg.profiles.get(idx) {
+            self.new_tab_with(profile);
+        }
+    }
+
+    fn new_tab_with(&mut self, profile: &crate::config::Profile) {
         let pane_id = app::next_id();
-        match TermPane::spawn(self.hwnd, pane_id, &app::shell(), 100, 30) {
+        match TermPane::spawn(self.hwnd, pane_id, profile, 100, 30) {
             Ok(tp) => {
                 let tab = Tab::single(Pane { id: pane_id, kind: PaneKind::Term(tp) });
                 self.tabs.push(tab);
                 self.switch_tab(self.tabs.len() - 1);
             },
             Err(e) => {
-                let msg = HSTRING::from(format!("Failed to start shell: {e}"));
+                let msg =
+                    HSTRING::from(format!("Failed to start {}: {e}", profile.name));
                 unsafe {
                     MessageBoxW(Some(self.hwnd), &msg, windows::core::w!("baduhan"), MB_ICONERROR);
                 }
             },
+        }
+    }
+
+    /// Native popup listing the configured profiles; `(x, y)` in DIPs.
+    fn show_profile_menu(&mut self, x: f32, y: f32) {
+        let cfg = app::config();
+        let picked = unsafe {
+            let Ok(menu) = CreatePopupMenu() else { return };
+            for (i, p) in cfg.profiles.iter().enumerate() {
+                let label = if i < 9 {
+                    format!("{}\tCtrl+Shift+{}", p.name, i + 1)
+                } else {
+                    p.name.clone()
+                };
+                let _ = AppendMenuW(menu, MF_STRING, i + 1, &HSTRING::from(label));
+            }
+            let s = self.scale();
+            let mut pt = POINT { x: (x * s) as i32, y: (y * s) as i32 };
+            let _ = ClientToScreen(self.hwnd, &mut pt);
+            let cmd = TrackPopupMenu(
+                menu,
+                TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN,
+                pt.x,
+                pt.y,
+                None,
+                self.hwnd,
+                None,
+            );
+            let _ = DestroyMenu(menu);
+            cmd.0 as usize
+        };
+        if picked > 0 {
+            self.new_tab_with_profile(picked - 1);
         }
     }
 
@@ -225,6 +275,43 @@ impl TermWindow {
                     let _ = SetFocus(Some(self.hwnd));
                 }
             }
+        self.sync_pane_focus();
+    }
+
+    fn term_by_id(&self, id: PaneId) -> Option<&TermPane> {
+        self.tabs.iter().find_map(|t| match t.pane(id).map(|p| &p.kind) {
+            Some(PaneKind::Term(tp)) => Some(tp),
+            _ => None,
+        })
+    }
+
+    /// Send focus-in/out (CSI I / CSI O) to terminals as pane focus moves —
+    /// pane switches and window activation both funnel through here.
+    fn sync_pane_focus(&mut self) {
+        let cur = if self.focused {
+            self.tabs
+                .get(self.active)
+                .map(|t| t.active)
+                .filter(|id| self.term_by_id(*id).is_some())
+        } else {
+            None
+        };
+        if cur == self.focus_pane {
+            return;
+        }
+        let send = |t: Option<&TermPane>, seq: &[u8]| {
+            if let Some(t) = t
+                && t.term.lock().mode().contains(TermMode::FOCUS_IN_OUT) {
+                    t.pty.write(seq);
+                }
+        };
+        if let Some(old) = self.focus_pane {
+            send(self.term_by_id(old), b"\x1b[O");
+        }
+        if let Some(new) = cur {
+            send(self.term_by_id(new), b"\x1b[I");
+        }
+        self.focus_pane = cur;
     }
 
     // ----- layout ----------------------------------------------------------
@@ -357,6 +444,7 @@ impl TermWindow {
                 );
             }
 
+            let dim = app::config().dim_inactive_panes.clamp(0.0, 0.8);
             for (id, r) in &lay.panes {
                 let Some(pane) = tab.pane(*id) else { continue };
                 let active = *id == tab.active;
@@ -373,6 +461,12 @@ impl TermWindow {
                             prect,
                             self.focused && active,
                         );
+                        drop(term);
+                        // iTerm2-style dimming of unfocused splits. (Browser
+                        // panes are live HWNDs above us — can't be veiled.)
+                        if multi && !active && dim > 0.0 {
+                            win.fill(prect, palette::d2d_a(palette::rgb(0, 0, 0), dim));
+                        }
                     },
                     PaneKind::Browser(_) => {
                         self.draw_browser_chrome(win, *r);
@@ -528,7 +622,8 @@ impl TermWindow {
         let kind = if browser {
             PaneKind::Browser(BrowserPane::new(self.hwnd, pane_id, "about:blank", self.edit_font))
         } else {
-            match TermPane::spawn(self.hwnd, pane_id, &app::shell(), 80, 24) {
+            let cfg = app::config();
+            match TermPane::spawn(self.hwnd, pane_id, cfg.default_profile(), 80, 24) {
                 Ok(t) => PaneKind::Term(t),
                 Err(_) => return,
             }
@@ -575,8 +670,12 @@ impl TermWindow {
         match tab.remove(pane_id) {
             Some(pane) => {
                 drop(pane);
+                if self.focus_pane == Some(pane_id) {
+                    self.focus_pane = None;
+                }
                 if tab_idx == self.active {
                     self.relayout();
+                    self.sync_pane_focus();
                 }
                 self.invalidate();
                 self.update_title();
@@ -641,7 +740,8 @@ impl TermWindow {
             return;
         }
         self.font_size = size;
-        if let Ok(f) = FontSet::new(&app::gfx(), size) {
+        let family = self.fonts.family.clone();
+        if let Ok(f) = FontSet::new(&app::gfx(), &family, size) {
             self.fonts = f;
         }
         self.relayout();
@@ -765,6 +865,10 @@ impl TermWindow {
                 },
                 b'C' => self.copy_selection(),
                 b'V' => self.paste(),
+                c @ b'1'..=b'9' => {
+                    // New tab with profile N (Windows Terminal muscle memory).
+                    self.new_tab_with_profile((c - b'1') as usize);
+                },
                 _ => match vkk {
                     VK_TAB => {
                         let n = self.tabs.len();
@@ -812,7 +916,7 @@ impl TermWindow {
                 return false;
             }
             if c == b'0' {
-                self.set_font_size(13.0);
+                self.set_font_size(app::config().font_size);
                 return true;
             }
             if (b'1'..=b'9').contains(&c) {
@@ -1015,6 +1119,7 @@ impl TermWindow {
             if let Some(tab) = self.tabs.get_mut(self.active)
                 && tab.active != pane_id {
                     tab.active = pane_id;
+                    self.sync_pane_focus();
                     self.update_title();
                     self.invalidate();
                 }
@@ -1251,6 +1356,11 @@ impl TermWindow {
     }
 
     fn on_rbutton_down(&mut self, x: f32, y: f32) {
+        // Tab bar: right-click anywhere offers the profile list.
+        if y < TABBAR_H {
+            self.show_profile_menu(x, y);
+            return;
+        }
         let Some((pane_id, prect)) = self.pane_at(x, y) else { return };
         let mods = Mods::current();
         if self.mouse_report(pane_id, prect, x, y, 2, true, false, &mods) {
@@ -1272,12 +1382,18 @@ impl TermWindow {
     }
 
     fn on_wheel(&mut self, x: f32, y: f32, delta: i16) {
+        let mods = Mods::current();
+        // Ctrl+wheel: font zoom (Windows Terminal / browser convention).
+        if mods.ctrl && !mods.shift && !mods.alt {
+            let step = if delta > 0 { 1.0 } else { -1.0 };
+            self.set_font_size(self.font_size + step);
+            return;
+        }
         let lines = (delta as f32 / 120.0 * 3.0).round() as i32;
         if lines == 0 {
             return;
         }
         let Some((pane_id, prect)) = self.pane_at(x, y) else { return };
-        let mods = Mods::current();
 
         let Some(tab) = self.tabs.get(self.active) else { return };
         let Some(pane) = tab.pane(pane_id) else { return };
@@ -1422,12 +1538,7 @@ impl TermWindow {
             },
             WM_SETFOCUS | WM_KILLFOCUS => {
                 self.focused = msg == WM_SETFOCUS;
-                let seq: &[u8] = if self.focused { b"\x1b[I" } else { b"\x1b[O" };
-                self.with_active_term(|t| {
-                    if t.term.lock().mode().contains(TermMode::FOCUS_IN_OUT) {
-                        t.pty.write(seq);
-                    }
-                });
+                self.sync_pane_focus();
                 self.invalidate();
                 Some(LRESULT(0))
             },
@@ -1577,6 +1688,7 @@ impl TermWindow {
                     9 => self.focus_dir(-1, 0),
                     10 => self.detach_tab(self.active, Some((300, 300))),
                     11 => self.set_font_size(self.font_size + 2.0),
+                    12 => self.new_tab_with_profile(lparam.0 as usize),
                     _ => {},
                 }
                 Some(LRESULT(0))

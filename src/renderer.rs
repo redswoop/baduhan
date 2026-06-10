@@ -6,7 +6,7 @@ use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{point_to_viewport, Term, TermMode};
 use alacritty_terminal::vte::ansi::{CursorShape, Rgb};
 use anyhow::Result;
-use windows::core::w;
+use windows::core::{w, HSTRING};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Direct2D::Common::*;
 use windows::Win32::Graphics::Direct2D::*;
@@ -32,7 +32,7 @@ impl Gfx {
     }
 }
 
-/// Text formats + cell metrics for one font size (all DIPs).
+/// Text formats + cell metrics for one font family and size (all DIPs).
 pub struct FontSet {
     pub regular: IDWriteTextFormat,
     pub bold: IDWriteTextFormat,
@@ -40,18 +40,47 @@ pub struct FontSet {
     pub bold_italic: IDWriteTextFormat,
     pub ui: IDWriteTextFormat,
     pub icons: IDWriteTextFormat,
+    /// The family actually in use (after fallback validation).
+    pub family: String,
     pub cell_w: f32,
     pub cell_h: f32,
 }
 
-pub const FONT_FAMILY: windows::core::PCWSTR = w!("Cascadia Mono");
+pub const FALLBACK_FAMILIES: [&str; 2] = ["Cascadia Mono", "Consolas"];
+
+/// Does the system font collection contain this family? (DirectWrite silently
+/// substitutes unknown families, which would mangle cell metrics — validate.)
+pub fn family_exists(gfx: &Gfx, family: &str) -> bool {
+    unsafe {
+        let mut coll = None;
+        if gfx.dwrite.GetSystemFontCollection(&mut coll, false).is_err() {
+            return false;
+        }
+        let Some(coll) = coll else { return false };
+        let mut index = 0u32;
+        let mut exists = windows::core::BOOL(0);
+        coll.FindFamilyName(&HSTRING::from(family), &mut index, &mut exists).is_ok()
+            && exists.as_bool()
+    }
+}
 
 impl FontSet {
-    pub fn new(gfx: &Gfx, size: f32) -> Result<FontSet> {
+    pub fn new(gfx: &Gfx, family: &str, size: f32) -> Result<FontSet> {
+        let family = if family_exists(gfx, family) {
+            family.to_string()
+        } else {
+            eprintln!("font family '{family}' not installed; falling back");
+            FALLBACK_FAMILIES
+                .iter()
+                .find(|f| family_exists(gfx, f))
+                .map(|f| f.to_string())
+                .unwrap_or_else(|| "Consolas".to_string())
+        };
+        let family_h = HSTRING::from(family.as_str());
         unsafe {
             let make = |weight: DWRITE_FONT_WEIGHT, style: DWRITE_FONT_STYLE| -> Result<IDWriteTextFormat> {
                 let f = gfx.dwrite.CreateTextFormat(
-                    FONT_FAMILY,
+                    &family_h,
                     None,
                     weight,
                     style,
@@ -105,6 +134,7 @@ impl FontSet {
                 bold_italic,
                 ui,
                 icons,
+                family,
                 cell_w: metrics.widthIncludingTrailingWhitespace,
                 cell_h: metrics.height,
             })
@@ -279,8 +309,15 @@ struct Run {
     width: usize,
     text: String,
     fg: Rgb,
+    underline: Rgb,
     flags: Flags,
 }
+
+const ALL_UNDERLINES: Flags = Flags::UNDERLINE
+    .union(Flags::DOUBLE_UNDERLINE)
+    .union(Flags::UNDERCURL)
+    .union(Flags::DOTTED_UNDERLINE)
+    .union(Flags::DASHED_UNDERLINE);
 
 /// Paint one terminal pane's grid into `area` (DIPs).
 pub fn draw_term(
@@ -294,7 +331,8 @@ pub fn draw_term(
     unsafe {
         win.rt.PushAxisAlignedClip(&area, D2D1_ANTIALIAS_MODE_ALIASED);
     }
-    win.fill(area, palette::d2d(palette::DEFAULT_BG));
+    let sch = palette::scheme();
+    win.fill(area, palette::d2d(sch.bg));
 
     let content = term.renderable_content();
     let display_offset = content.display_offset;
@@ -329,15 +367,19 @@ pub fn draw_term(
         if selected {
             std::mem::swap(&mut fg, &mut bg);
             if fg == bg {
-                fg = palette::DEFAULT_BG;
-                bg = palette::DEFAULT_FG;
+                fg = sch.bg;
+                bg = sch.fg;
             }
         }
+        let underline = cell
+            .underline_color()
+            .map(|c| palette::resolve(c, colors))
+            .unwrap_or(fg);
 
         let width = if cell.flags.contains(Flags::WIDE_CHAR) { 2 } else { 1 };
 
         // Background cell rect (only when it differs from the cleared default).
-        if bg != palette::DEFAULT_BG {
+        if bg != sch.bg {
             win.fill(
                 rect(
                     ox + col as f32 * cw,
@@ -350,14 +392,17 @@ pub fn draw_term(
         }
 
         let drawable = cell.c != ' ' || cell.zerowidth().is_some();
-        let style_flags = cell.flags & (Flags::BOLD | Flags::ITALIC | Flags::UNDERLINE
-            | Flags::DOUBLE_UNDERLINE | Flags::UNDERCURL | Flags::DOTTED_UNDERLINE
-            | Flags::DASHED_UNDERLINE | Flags::STRIKEOUT);
+        let style_flags = cell.flags
+            & (Flags::BOLD | Flags::ITALIC | ALL_UNDERLINES | Flags::STRIKEOUT);
 
         // Flush the run when discontiguous or styles change.
         let flush = match &cur {
             Some(r) => {
-                r.row != row || r.col + r.width != col || r.fg != fg || r.flags != style_flags
+                r.row != row
+                    || r.col + r.width != col
+                    || r.fg != fg
+                    || r.underline != underline
+                    || r.flags != style_flags
             },
             None => false,
         };
@@ -372,6 +417,7 @@ pub fn draw_term(
                 width: 0,
                 text: String::new(),
                 fg,
+                underline,
                 flags: style_flags,
             });
             // Pad for any skipped blank cells within the same logical run start.
@@ -382,7 +428,7 @@ pub fn draw_term(
             r.width += width;
         } else if let Some(r) = &mut cur {
             // Blank cell inside a run: keep monospace alignment with a space.
-            if r.row == row && r.col + r.width == col && !r.flags.intersects(Flags::UNDERLINE | Flags::STRIKEOUT) {
+            if r.row == row && r.col + r.width == col && !r.flags.intersects(ALL_UNDERLINES | Flags::STRIKEOUT) {
                 r.text.push(' ');
                 r.width += 1;
             } else {
@@ -414,14 +460,39 @@ pub fn draw_term(
                 );
             }
             let end_x = x + r.width as f32 * cw;
-            if r.flags.intersects(
-                Flags::UNDERLINE | Flags::DOUBLE_UNDERLINE | Flags::UNDERCURL
-                    | Flags::DOTTED_UNDERLINE | Flags::DASHED_UNDERLINE,
-            ) {
-                win.line(x, y + ch - 1.5, end_x, y + ch - 1.5, palette::d2d(r.fg), 1.0);
-                if r.flags.contains(Flags::DOUBLE_UNDERLINE) {
-                    win.line(x, y + ch - 3.5, end_x, y + ch - 3.5, palette::d2d(r.fg), 1.0);
+            let ucolor = palette::d2d(r.underline);
+            let uy = y + ch - 1.5;
+            if r.flags.contains(Flags::UNDERCURL) {
+                // Sine wave: half a period per cell, ~1.2 DIP amplitude.
+                let amp = 1.2f32;
+                let step = 1.0f32;
+                let freq = std::f32::consts::PI / (cw / 2.0);
+                let mut px = x;
+                let mut py = uy - amp * ((px - x) * freq).sin();
+                while px < end_x {
+                    let nx = (px + step).min(end_x);
+                    let ny = uy - amp * ((nx - x) * freq).sin();
+                    win.line(px, py, nx, ny, ucolor, 1.0);
+                    px = nx;
+                    py = ny;
                 }
+            } else if r.flags.contains(Flags::DOTTED_UNDERLINE) {
+                let mut px = x;
+                while px < end_x {
+                    win.fill(rect(px, uy - 0.5, (px + 1.0).min(end_x), uy + 0.5), ucolor);
+                    px += 2.5;
+                }
+            } else if r.flags.contains(Flags::DASHED_UNDERLINE) {
+                let mut px = x;
+                while px < end_x {
+                    win.line(px, uy, (px + 3.0).min(end_x), uy, ucolor, 1.0);
+                    px += 5.0;
+                }
+            } else if r.flags.contains(Flags::DOUBLE_UNDERLINE) {
+                win.line(x, uy, end_x, uy, ucolor, 1.0);
+                win.line(x, uy - 2.0, end_x, uy - 2.0, ucolor, 1.0);
+            } else if r.flags.contains(Flags::UNDERLINE) {
+                win.line(x, uy, end_x, uy, ucolor, 1.0);
             }
             if r.flags.contains(Flags::STRIKEOUT) {
                 win.line(x, y + ch * 0.55, end_x, y + ch * 0.55, palette::d2d(r.fg), 1.0);
@@ -439,7 +510,14 @@ pub fn draw_term(
             let x = ox + col as f32 * cw;
             let y = oy + row as f32 * ch;
             let cell_rect = rect(x, y, x + width as f32 * cw, y + ch);
-            let ccolor = palette::d2d(palette::DEFAULT_FG);
+            // OSC 12 can override the cursor color at runtime.
+            let cursor_rgb = palette::resolve(
+                alacritty_terminal::vte::ansi::Color::Named(
+                    alacritty_terminal::vte::ansi::NamedColor::Cursor,
+                ),
+                colors,
+            );
+            let ccolor = palette::d2d(cursor_rgb);
             let shape = if focused { cursor.shape } else { CursorShape::HollowBlock };
             match shape {
                 CursorShape::Block => {
@@ -454,7 +532,7 @@ pub fn draw_term(
                                 cw * 3.0,
                                 ch * 2.0,
                             ) {
-                                win.brush.SetColor(&palette::d2d(palette::DEFAULT_BG));
+                                win.brush.SetColor(&palette::d2d(sch.bg));
                                 win.rt.DrawTextLayout(
                                     Vector2 { X: x, Y: y },
                                     &layout,
