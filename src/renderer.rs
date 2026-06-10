@@ -43,8 +43,13 @@ pub struct FontSet {
     pub icons: IDWriteTextFormat,
     /// The family actually in use (after fallback validation).
     pub family: String,
+    /// Cell box, snapped to whole device pixels so columns/rows sit on the
+    /// pixel grid (fractional positions = ClearType smear).
     pub cell_w: f32,
     pub cell_h: f32,
+    /// The font's natural advance; the difference vs. cell_w is injected as
+    /// per-glyph spacing so long runs stay on the grid.
+    pub advance: f32,
 }
 
 pub const FALLBACK_FAMILIES: [&str; 2] = ["Cascadia Mono", "Consolas"];
@@ -66,7 +71,7 @@ pub fn family_exists(gfx: &Gfx, family: &str) -> bool {
 }
 
 impl FontSet {
-    pub fn new(gfx: &Gfx, family: &str, size: f32) -> Result<FontSet> {
+    pub fn new(gfx: &Gfx, family: &str, size: f32, dpi: f32) -> Result<FontSet> {
         let family = if family_exists(gfx, family) {
             family.to_string()
         } else {
@@ -128,6 +133,8 @@ impl FontSet {
             let mut metrics = DWRITE_TEXT_METRICS::default();
             layout.GetMetrics(&mut metrics)?;
 
+            let scale = (dpi / 96.0).max(0.5);
+            let snap = |v: f32| ((v * scale).round().max(1.0)) / scale;
             Ok(FontSet {
                 regular,
                 bold,
@@ -136,8 +143,9 @@ impl FontSet {
                 ui,
                 icons,
                 family,
-                cell_w: metrics.widthIncludingTrailingWhitespace,
-                cell_h: metrics.height,
+                cell_w: snap(metrics.widthIncludingTrailingWhitespace),
+                cell_h: snap(metrics.height),
+                advance: metrics.widthIncludingTrailingWhitespace,
             })
         }
     }
@@ -164,6 +172,7 @@ pub struct WindowGfx {
     /// Decoded inline-image bitmaps, keyed by image id. None = decode failed
     /// (don't retry every frame). Lives with the render target.
     img_cache: std::cell::RefCell<std::collections::HashMap<u64, Option<ID2D1Bitmap>>>,
+    dpi: std::cell::Cell<f32>,
 }
 
 impl WindowGfx {
@@ -185,6 +194,7 @@ impl WindowGfx {
                 hwnd_rt: Some(hwnd_rt),
                 brush,
                 img_cache: Default::default(),
+                dpi: std::cell::Cell::new(dpi),
             })
         }
     }
@@ -217,7 +227,13 @@ impl WindowGfx {
             rt.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
             let brush = rt.CreateSolidColorBrush(&palette::d2d(palette::DEFAULT_FG), None)?;
             Ok((
-                WindowGfx { rt, hwnd_rt: None, brush, img_cache: Default::default() },
+                WindowGfx {
+                    rt,
+                    hwnd_rt: None,
+                    brush,
+                    img_cache: Default::default(),
+                    dpi: std::cell::Cell::new(dpi),
+                },
                 bmp,
             ))
         }
@@ -232,7 +248,14 @@ impl WindowGfx {
     }
 
     pub fn set_dpi(&self, dpi: f32) {
+        self.dpi.set(dpi);
         unsafe { self.rt.SetDpi(dpi, dpi) };
+    }
+
+    /// Snap a DIP coordinate to the device pixel grid.
+    pub fn snap(&self, v: f32) -> f32 {
+        let s = (self.dpi.get() / 96.0).max(0.5);
+        (v * s).round() / s
     }
 
     pub fn fill(&self, rect: D2D_RECT_F, color: D2D1_COLOR_F) {
@@ -354,6 +377,159 @@ pub fn rect(left: f32, top: f32, right: f32, bottom: f32) -> D2D_RECT_F {
     D2D_RECT_F { left, top, right, bottom }
 }
 
+/// Draw a box-drawing / block-element char as geometry filling the cell
+/// exactly — fonts never tile U+2500–259F cleanly across a snapped grid.
+fn draw_decor(win: &WindowGfx, x: f32, y: f32, cw: f32, ch: f32, c: char, fg: Rgb) {
+    let color = palette::d2d(fg);
+    let fill = |l: f32, t: f32, r: f32, b: f32| win.fill(rect(x + l, y + t, x + r, y + b), color);
+    let alpha = |a: f32| win.fill(rect(x, y, x + cw, y + ch), palette::d2d_a(fg, a));
+
+    // Block elements first (pure rectangles).
+    match c {
+        '\u{2588}' => return fill(0.0, 0.0, cw, ch),                       // █
+        '\u{2580}' => return fill(0.0, 0.0, cw, ch / 2.0),                 // ▀
+        '\u{2584}' => return fill(0.0, ch / 2.0, cw, ch),                  // ▄
+        '\u{258C}' => return fill(0.0, 0.0, cw / 2.0, ch),                 // ▌
+        '\u{2590}' => return fill(cw / 2.0, 0.0, cw, ch),                  // ▐
+        '\u{2594}' => return fill(0.0, 0.0, cw, ch / 8.0),                 // ▔
+        '\u{2595}' => return fill(cw * 7.0 / 8.0, 0.0, cw, ch),            // ▕
+        '\u{2591}' => return alpha(0.25),                                  // ░
+        '\u{2592}' => return alpha(0.5),                                   // ▒
+        '\u{2593}' => return alpha(0.75),                                  // ▓
+        // ▁▂▃▄▅▆▇ lower eighths (2581..2587)
+        '\u{2581}'..='\u{2587}' => {
+            let k = (c as u32 - 0x2580) as f32; // 1..7 eighths
+            return fill(0.0, ch * (1.0 - k / 8.0), cw, ch);
+        },
+        // ▉▊▋▌▍▎▏ left eighths (2589..258F = 7/8 .. 1/8)
+        '\u{2589}'..='\u{258F}' => {
+            let k = 8.0 - (c as u32 - 0x2588) as f32; // 7..1 eighths
+            return fill(0.0, 0.0, cw * k / 8.0, ch);
+        },
+        // Quadrants 2596..259F.
+        '\u{2596}'..='\u{259F}' => {
+            // bits: (upper-left, upper-right, lower-left, lower-right)
+            let quads = match c {
+                '\u{2596}' => (false, false, true, false),
+                '\u{2597}' => (false, false, false, true),
+                '\u{2598}' => (true, false, false, false),
+                '\u{2599}' => (true, false, true, true),
+                '\u{259A}' => (true, false, false, true),
+                '\u{259B}' => (true, true, true, false),
+                '\u{259C}' => (true, true, false, true),
+                '\u{259D}' => (false, true, false, false),
+                '\u{259E}' => (false, true, true, false),
+                _ => (false, true, true, true), // 259F
+            };
+            let (hw, hh) = (cw / 2.0, ch / 2.0);
+            if quads.0 {
+                fill(0.0, 0.0, hw, hh);
+            }
+            if quads.1 {
+                fill(hw, 0.0, cw, hh);
+            }
+            if quads.2 {
+                fill(0.0, hh, hw, ch);
+            }
+            if quads.3 {
+                fill(hw, hh, cw, ch);
+            }
+            return;
+        },
+        _ => {},
+    }
+
+    // Line-drawing: (up, down, left, right, heavy, double).
+    let (u, d, l, r, heavy, double) = match c {
+        '\u{2500}' => (false, false, true, true, false, false),  // ─
+        '\u{2501}' => (false, false, true, true, true, false),   // ━
+        '\u{2502}' => (true, true, false, false, false, false),  // │
+        '\u{2503}' => (true, true, false, false, true, false),   // ┃
+        '\u{250C}' | '\u{256D}' => (false, true, false, true, false, false), // ┌ ╭
+        '\u{250F}' => (false, true, false, true, true, false),
+        '\u{2510}' | '\u{256E}' => (false, true, true, false, false, false), // ┐ ╮
+        '\u{2513}' => (false, true, true, false, true, false),
+        '\u{2514}' | '\u{2570}' => (true, false, false, true, false, false), // └ ╰
+        '\u{2517}' => (true, false, false, true, true, false),
+        '\u{2518}' | '\u{256F}' => (true, false, true, false, false, false), // ┘ ╯
+        '\u{251B}' => (true, false, true, false, true, false),
+        '\u{251C}' => (true, true, false, true, false, false),   // ├
+        '\u{2523}' => (true, true, false, true, true, false),
+        '\u{2524}' => (true, true, true, false, false, false),   // ┤
+        '\u{252B}' => (true, true, true, false, true, false),
+        '\u{252C}' => (false, true, true, true, false, false),   // ┬
+        '\u{2533}' => (false, true, true, true, true, false),
+        '\u{2534}' => (true, false, true, true, false, false),   // ┴
+        '\u{253B}' => (true, false, true, true, true, false),
+        '\u{253C}' => (true, true, true, true, false, false),    // ┼
+        '\u{254B}' => (true, true, true, true, true, false),
+        '\u{2550}' => (false, false, true, true, false, true),   // ═
+        '\u{2551}' => (true, true, false, false, false, true),   // ║
+        '\u{2554}' => (false, true, false, true, false, true),   // ╔
+        '\u{2557}' => (false, true, true, false, false, true),   // ╗
+        '\u{255A}' => (true, false, false, true, false, true),   // ╚
+        '\u{255D}' => (true, false, true, false, false, true),   // ╝
+        '\u{2560}' => (true, true, false, true, false, true),    // ╠
+        '\u{2563}' => (true, true, true, false, false, true),    // ╣
+        '\u{2566}' => (false, true, true, true, false, true),    // ╦
+        '\u{2569}' => (true, false, true, true, false, true),    // ╩
+        '\u{256C}' => (true, true, true, true, false, true),     // ╬
+        '\u{2574}' => (false, false, true, false, false, false), // ╴
+        '\u{2575}' => (true, false, false, false, false, false), // ╵
+        '\u{2576}' => (false, false, false, true, false, false), // ╶
+        '\u{2577}' => (false, true, false, false, false, false), // ╷
+        // Dashed lines: render as their solid counterparts.
+        '\u{254C}' | '\u{2504}' | '\u{2508}' => (false, false, true, true, false, false),
+        '\u{254E}' | '\u{2506}' | '\u{250A}' => (true, true, false, false, false, false),
+        _ => {
+            // Unknown decor char: fall back to a centered dot so it's visible.
+            let t = (ch / 10.0).max(1.5);
+            fill(cw / 2.0 - t / 2.0, ch / 2.0 - t / 2.0, cw / 2.0 + t / 2.0, ch / 2.0 + t / 2.0);
+            return;
+        },
+    };
+
+    let t = if heavy { (ch / 8.0).max(2.0) } else { (ch / 16.0).max(1.0) };
+    let (cx, cy) = (cw / 2.0, ch / 2.0);
+    let stroke = |x0: f32, y0: f32, x1: f32, y1: f32| fill(x0, y0, x1, y1);
+    if double {
+        let off = t * 1.5;
+        // Two parallel thin lines per arm.
+        let tt = t.max(1.0) / 1.5;
+        let arm_h = |from: f32, to: f32, yo: f32| stroke(from, cy + yo - tt / 2.0, to, cy + yo + tt / 2.0);
+        let arm_v = |from: f32, to: f32, xo: f32| stroke(cx + xo - tt / 2.0, from, cx + xo + tt / 2.0, to);
+        if l {
+            arm_h(0.0, cx + off, -off);
+            arm_h(0.0, cx + off, off);
+        }
+        if r {
+            arm_h(cx - off, cw, -off);
+            arm_h(cx - off, cw, off);
+        }
+        if u {
+            arm_v(0.0, cy + off, -off);
+            arm_v(0.0, cy + off, off);
+        }
+        if d {
+            arm_v(cy - off, ch, -off);
+            arm_v(cy - off, ch, off);
+        }
+        return;
+    }
+    if l {
+        stroke(0.0, cy - t / 2.0, cx + t / 2.0, cy + t / 2.0);
+    }
+    if r {
+        stroke(cx - t / 2.0, cy - t / 2.0, cw, cy + t / 2.0);
+    }
+    if u {
+        stroke(cx - t / 2.0, 0.0, cx + t / 2.0, cy + t / 2.0);
+    }
+    if d {
+        stroke(cx - t / 2.0, cy - t / 2.0, cx + t / 2.0, ch);
+    }
+}
+
 struct Run {
     row: usize,
     col: usize,
@@ -362,6 +538,19 @@ struct Run {
     fg: Rgb,
     underline: Rgb,
     flags: Flags,
+}
+
+/// Box-drawing / block-element cell drawn as geometry instead of a glyph
+/// (fonts never tile these cleanly across the snapped cell grid).
+struct Decor {
+    row: usize,
+    col: usize,
+    c: char,
+    fg: Rgb,
+}
+
+fn is_decor(c: char) -> bool {
+    ('\u{2500}'..='\u{259F}').contains(&c)
 }
 
 const ALL_UNDERLINES: Flags = Flags::UNDERLINE
@@ -395,10 +584,11 @@ pub fn draw_term(
     let selection = content.selection;
     let colors = content.colors;
     let (cw, ch) = (fonts.cell_w, fonts.cell_h);
-    let ox = area.left + 2.0;
-    let oy = area.top + 2.0;
+    let ox = win.snap(area.left + 2.0);
+    let oy = win.snap(area.top + 2.0);
 
     let mut runs: Vec<Run> = Vec::new();
+    let mut decors: Vec<Decor> = Vec::new();
     let mut cur: Option<Run> = None;
 
     for indexed in content.display_iter {
@@ -466,6 +656,15 @@ pub fn draw_term(
             runs.push(cur.take().unwrap());
         }
 
+        // Box/block characters get crisp geometry, not glyphs.
+        if drawable && is_decor(cell.c) && cell.zerowidth().is_none() {
+            if let Some(r) = cur.take() {
+                runs.push(r);
+            }
+            decors.push(Decor { row, col, c: cell.c, fg });
+            continue;
+        }
+
         if drawable {
             let r = cur.get_or_insert(Run {
                 row,
@@ -496,6 +695,9 @@ pub fn draw_term(
         runs.push(r);
     }
 
+    // Per-glyph spacing keeps every column on the snapped pixel grid even
+    // though the font's natural advance is fractional.
+    let spacing = cw - fonts.advance;
     unsafe {
         for r in &runs {
             let x = ox + r.col as f32 * cw;
@@ -507,6 +709,16 @@ pub fn draw_term(
                 (r.width as f32 + 2.0) * cw,
                 ch * 2.0,
             ) {
+                if spacing.abs() > 0.001
+                    && let Ok(l1) = windows::core::Interface::cast::<IDWriteTextLayout1>(&layout)
+                {
+                    let _ = l1.SetCharacterSpacing(
+                        0.0,
+                        spacing,
+                        0.0,
+                        DWRITE_TEXT_RANGE { startPosition: 0, length: utf16.len() as u32 },
+                    );
+                }
                 win.brush.SetColor(&palette::d2d(r.fg));
                 win.rt.DrawTextLayout(
                     Vector2 { X: x, Y: y },
@@ -554,6 +766,10 @@ pub fn draw_term(
                 win.line(x, y + ch * 0.55, end_x, y + ch * 0.55, palette::d2d(r.fg), 1.0);
             }
         }
+    }
+
+    for d in &decors {
+        draw_decor(win, ox + d.col as f32 * cw, oy + d.row as f32 * ch, cw, ch, d.c, d.fg);
     }
 
     // Cursor.

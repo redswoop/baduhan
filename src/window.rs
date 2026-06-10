@@ -124,7 +124,8 @@ impl TermWindow {
         let dpi = unsafe { GetDpiForWindow(hwnd) } as f32;
         let dpi = if dpi <= 0.0 { 96.0 } else { dpi };
         let cfg = app::config();
-        let fonts = FontSet::new(&app::gfx(), &cfg.font_family, cfg.font_size).expect("fonts");
+        let fonts =
+            FontSet::new(&app::gfx(), &cfg.font_family, cfg.font_size, dpi).expect("fonts");
         let edit_font = make_edit_font(dpi);
         let edit_brush = unsafe { CreateSolidBrush(COLORREF(0x002A1E1E)) };
         TermWindow {
@@ -852,7 +853,7 @@ impl TermWindow {
             };
             if (ts.font_size - cfg.font_size).abs() > 0.01 {
                 tab.fonts =
-                    FontSet::new(&app::gfx(), &self.fonts.family, ts.font_size).ok();
+                    FontSet::new(&app::gfx(), &self.fonts.family, ts.font_size, self.dpi).ok();
             }
             self.tabs.push(tab);
         }
@@ -1227,7 +1228,7 @@ impl TermWindow {
         tab.font_size = size;
         if (size - default_size).abs() < 0.01 {
             tab.fonts = None; // back on the shared default set
-        } else if let Ok(f) = FontSet::new(&app::gfx(), &family, size) {
+        } else if let Ok(f) = FontSet::new(&app::gfx(), &family, size, self.dpi) {
             tab.fonts = Some(f);
         }
         self.relayout();
@@ -2701,6 +2702,19 @@ impl TermWindow {
                 self.dpi = loword(wparam.0 as u32) as f32;
                 if let Some(g) = &self.gfx_win {
                     g.set_dpi(self.dpi);
+                }
+                // Cell metrics are snapped to the pixel grid per DPI.
+                let family = self.fonts.family.clone();
+                if let Ok(f) =
+                    FontSet::new(&app::gfx(), &family, app::config().font_size, self.dpi)
+                {
+                    self.fonts = f;
+                }
+                for tab in &mut self.tabs {
+                    if tab.fonts.is_some() {
+                        tab.fonts =
+                            FontSet::new(&app::gfx(), &family, tab.font_size, self.dpi).ok();
+                    }
                 }
                 unsafe {
                     let rc = *(lparam.0 as *const RECT);
