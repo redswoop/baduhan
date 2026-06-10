@@ -18,6 +18,7 @@ mod pane_tree;
 mod pty;
 mod renderer;
 mod scripting;
+mod session;
 mod tabs;
 mod term_pane;
 mod vt_tests;
@@ -41,10 +42,21 @@ fn main() {
     }
 
     // Load config (and activate the color scheme) before any window exists.
-    let _ = app::config();
+    let cfg = app::config();
 
     app::register_class();
-    app::create_window(None, None);
+    let restored = cfg.restore_session
+        && session::load()
+            .filter(|s| !s.windows.is_empty())
+            .map(|s| {
+                for ws in s.windows {
+                    app::create_window_restored(ws);
+                }
+            })
+            .is_some();
+    if !restored {
+        app::create_window(None, None);
+    }
 
     let mut msg = MSG::default();
     unsafe {

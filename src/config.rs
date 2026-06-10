@@ -49,6 +49,9 @@ pub struct Config {
     /// connectOverCDP, claude --chrome, etc.). 0 disables.
     #[serde(default = "default_cdp_port")]
     pub browser_debug_port: u16,
+    /// Reopen last session's windows/tabs/splits (with cwds) on launch.
+    #[serde(default = "default_true")]
+    pub restore_session: bool,
     #[serde(default)]
     pub default_profile: String,
     #[serde(default)]
@@ -72,6 +75,9 @@ fn default_scrollback() -> usize {
 fn default_cdp_port() -> u16 {
     9333
 }
+fn default_true() -> bool {
+    true
+}
 
 impl Default for Config {
     fn default() -> Self {
@@ -81,6 +87,7 @@ impl Default for Config {
             dim_inactive_panes: default_dim(),
             scrollback_lines: default_scrollback(),
             browser_debug_port: default_cdp_port(),
+            restore_session: true,
             default_profile: String::new(),
             profiles: Vec::new(),
             scheme: None,

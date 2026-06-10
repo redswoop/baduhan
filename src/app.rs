@@ -66,11 +66,34 @@ pub fn register_class() {
     }
 }
 
+/// What a new window starts with.
+pub enum WindowInit {
+    Fresh,
+    Adopt(Tab),
+    Restore(crate::session::WindowState),
+}
+
 pub fn create_window(initial: Option<Tab>, pos: Option<(i32, i32)>) {
+    let init = match initial {
+        Some(tab) => WindowInit::Adopt(tab),
+        None => WindowInit::Fresh,
+    };
+    let pos = pos.map(|(x, y)| (x - 80, y - 16));
+    create_window_init(init, pos, None);
+}
+
+pub fn create_window_restored(state: crate::session::WindowState) {
+    let pos = Some((state.x, state.y));
+    let size = Some((state.w, state.h));
+    create_window_init(WindowInit::Restore(state), pos, size);
+}
+
+fn create_window_init(init: WindowInit, pos: Option<(i32, i32)>, size: Option<(i32, i32)>) {
     unsafe {
         let hinstance = GetModuleHandleW(None).unwrap_or_default();
-        let param = Box::into_raw(Box::new(initial)) as *mut core::ffi::c_void;
-        let (x, y) = pos.map(|(x, y)| (x - 80, y - 16)).unwrap_or((CW_USEDEFAULT, CW_USEDEFAULT));
+        let param = Box::into_raw(Box::new(init)) as *mut core::ffi::c_void;
+        let (x, y) = pos.unwrap_or((CW_USEDEFAULT, CW_USEDEFAULT));
+        let (w, h) = size.unwrap_or((1180, 760));
         let _ = CreateWindowExW(
             WINDOW_EX_STYLE(0),
             WIN_CLASS,
@@ -78,14 +101,29 @@ pub fn create_window(initial: Option<Tab>, pos: Option<(i32, i32)>) {
             WS_OVERLAPPEDWINDOW | WS_VISIBLE,
             x,
             y,
-            1180,
-            760,
+            w.max(200),
+            h.max(120),
             None,
             None,
             Some(hinstance.into()),
             Some(param),
         );
     }
+}
+
+/// Snapshot every live window into a session and persist it.
+pub fn save_session() {
+    if !config().restore_session {
+        return;
+    }
+    let mut s = crate::session::Session::default();
+    let handles: Vec<isize> = WINDOWS.with(|w| w.borrow().clone());
+    for h in handles {
+        if let Some(Some(ws)) = with_window(HWND(h as *mut _), |w| w.snapshot()) {
+            s.windows.push(ws);
+        }
+    }
+    crate::session::save(&s);
 }
 
 fn register(hwnd: HWND) {
@@ -145,8 +183,9 @@ unsafe extern "system" fn wndproc(
     unsafe {
         if msg == WM_NCCREATE {
             let cs = lparam.0 as *const CREATESTRUCTW;
-            let init = (*cs).lpCreateParams as *mut Option<Tab>;
-            let initial = if init.is_null() { None } else { *Box::from_raw(init) };
+            let init = (*cs).lpCreateParams as *mut WindowInit;
+            let initial =
+                if init.is_null() { WindowInit::Fresh } else { *Box::from_raw(init) };
             let win = Box::new(TermWindow::new(hwnd, initial));
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(win) as isize);
             register(hwnd);

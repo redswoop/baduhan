@@ -116,11 +116,11 @@ pub struct TermWindow {
     edit_brush: HBRUSH,
     suppress_char: bool,
     pending_surrogate: Option<u16>,
-    pending_tab: Option<Tab>,
+    pending_init: Option<app::WindowInit>,
 }
 
 impl TermWindow {
-    pub fn new(hwnd: HWND, pending_tab: Option<Tab>) -> TermWindow {
+    pub fn new(hwnd: HWND, pending_init: app::WindowInit) -> TermWindow {
         let dpi = unsafe { GetDpiForWindow(hwnd) } as f32;
         let dpi = if dpi <= 0.0 { 96.0 } else { dpi };
         let cfg = app::config();
@@ -144,7 +144,7 @@ impl TermWindow {
             edit_brush,
             suppress_char: false,
             pending_surrogate: None,
-            pending_tab,
+            pending_init: Some(pending_init),
         }
     }
 
@@ -322,6 +322,9 @@ impl TermWindow {
         if idx >= self.tabs.len() {
             return;
         }
+        // Persist the session before any close mutates it; on app exit the
+        // last save before the final close wins.
+        app::save_session();
         drop(self.tabs.remove(idx));
         if self.tabs.is_empty() {
             unsafe {
@@ -739,6 +742,125 @@ impl TermWindow {
             None => {},
         }
         self.invalidate();
+    }
+
+    // ----- session save/restore ----------------------------------------------
+
+    /// Serialize this window (None when it has nothing worth saving).
+    pub fn snapshot(&self) -> Option<crate::session::WindowState> {
+        use crate::session::{LeafState, PaneType, TabState};
+        if self.tabs.is_empty() {
+            return None;
+        }
+        let mut rc = RECT::default();
+        unsafe {
+            let _ = GetWindowRect(self.hwnd, &mut rc);
+        }
+        let tabs = self
+            .tabs
+            .iter()
+            .map(|tab| {
+                let leaves = pane_tree::collect_leaves(&tab.root);
+                let active_leaf =
+                    leaves.iter().position(|l| *l == tab.active).unwrap_or(0);
+                let tree = crate::session::snapshot_node(&tab.root, &|id| {
+                    match tab.pane(id).map(|p| &p.kind) {
+                        Some(PaneKind::Term(t)) => LeafState {
+                            kind: PaneType::Term,
+                            profile: Some(t.profile_name.clone()),
+                            cwd: t.cwd(),
+                            url: None,
+                        },
+                        Some(PaneKind::Browser(b)) => LeafState {
+                            kind: PaneType::Browser,
+                            profile: None,
+                            cwd: None,
+                            url: Some(b.shared.url.lock().unwrap().clone()),
+                        },
+                        None => LeafState {
+                            kind: PaneType::Term,
+                            profile: None,
+                            cwd: None,
+                            url: None,
+                        },
+                    }
+                });
+                TabState { font_size: tab.font_size, active_leaf, tree }
+            })
+            .collect();
+        Some(crate::session::WindowState {
+            x: rc.left,
+            y: rc.top,
+            w: rc.right - rc.left,
+            h: rc.bottom - rc.top,
+            active: self.active,
+            tabs,
+        })
+    }
+
+    /// Rebuild tabs from a saved session state.
+    fn restore_tabs(&mut self, state: crate::session::WindowState) {
+        use crate::session::PaneType;
+        let cfg = app::config();
+        let hwnd = self.hwnd;
+        let edit_font = self.edit_font;
+        for ts in &state.tabs {
+            let mut panes: std::collections::HashMap<PaneId, Pane> =
+                std::collections::HashMap::new();
+            let root = crate::session::rebuild_node(&ts.tree, &mut |leaf| {
+                let id = app::next_id();
+                let kind = match leaf.kind {
+                    PaneType::Term => {
+                        let mut profile = cfg
+                            .profiles
+                            .iter()
+                            .find(|p| Some(&p.name) == leaf.profile.as_ref())
+                            .cloned()
+                            .unwrap_or_else(|| cfg.default_profile().clone());
+                        if let Some(cwd) = &leaf.cwd {
+                            profile.cwd = Some(cwd.clone());
+                            // `wsl --cd ~` would override the restored cwd.
+                            if let Some(i) =
+                                profile.command.iter().position(|a| a == "--cd")
+                            {
+                                let end = (i + 2).min(profile.command.len());
+                                profile.command.drain(i..end);
+                            }
+                        }
+                        PaneKind::Term(TermPane::spawn(hwnd, id, &profile, 80, 24).ok()?)
+                    },
+                    PaneType::Browser => PaneKind::Browser(BrowserPane::new(
+                        hwnd,
+                        id,
+                        leaf.url.as_deref().unwrap_or("about:blank"),
+                        edit_font,
+                    )),
+                };
+                panes.insert(id, Pane { id, kind });
+                Some(id)
+            });
+            let Some(root) = root else { continue };
+            let leaves = pane_tree::collect_leaves(&root);
+            let active = leaves.get(ts.active_leaf).copied().unwrap_or(leaves[0]);
+            let mut tab = Tab {
+                root,
+                panes,
+                active,
+                zoomed: None,
+                font_size: ts.font_size,
+                fonts: None,
+            };
+            if (ts.font_size - cfg.font_size).abs() > 0.01 {
+                tab.fonts =
+                    FontSet::new(&app::gfx(), &self.fonts.family, ts.font_size).ok();
+            }
+            self.tabs.push(tab);
+        }
+        if self.tabs.is_empty() {
+            self.new_tab();
+            return;
+        }
+        self.switch_tab(state.active.min(self.tabs.len() - 1));
     }
 
     /// Handle a `baduhan browse/reload/devtools` request from a shell pane.
@@ -2526,10 +2648,10 @@ impl TermWindow {
         match msg {
             WM_CREATE => {
                 crate::dragdrop::register(self.hwnd);
-                if let Some(tab) = self.pending_tab.take() {
-                    self.adopt_tab(tab, None);
-                } else {
-                    self.new_tab();
+                match self.pending_init.take() {
+                    Some(app::WindowInit::Adopt(tab)) => self.adopt_tab(tab, None),
+                    Some(app::WindowInit::Restore(state)) => self.restore_tabs(state),
+                    _ => self.new_tab(),
                 }
                 Some(LRESULT(0))
             },
@@ -2829,6 +2951,7 @@ impl TermWindow {
                 Some(LRESULT(0))
             },
             WM_CLOSE => {
+                app::save_session();
                 unsafe {
                     let _ = DestroyWindow(self.hwnd);
                 }
