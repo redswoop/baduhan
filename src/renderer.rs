@@ -381,6 +381,11 @@ pub fn draw_term(
 ) {
     unsafe {
         win.rt.PushAxisAlignedClip(&area, D2D1_ANTIALIAS_MODE_ALIASED);
+        // Cell backgrounds tile at fractional coordinates; antialiased fills
+        // leave a dark seam at every cell boundary (visible as a hatched
+        // texture when an app paints a full-row background, e.g. vim's
+        // cursorline). Aliased geometry pixel-snaps the fills instead.
+        win.rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
     }
     let sch = palette::scheme();
     win.fill(area, palette::d2d(sch.bg));
@@ -617,6 +622,7 @@ pub fn draw_term(
     }
 
     unsafe {
+        win.rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
         win.rt.PopAxisAlignedClip();
     }
 }
