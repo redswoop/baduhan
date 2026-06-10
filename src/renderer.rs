@@ -33,6 +33,7 @@ impl Gfx {
 }
 
 /// Text formats + cell metrics for one font family and size (all DIPs).
+#[derive(Clone)]
 pub struct FontSet {
     pub regular: IDWriteTextFormat,
     pub bold: IDWriteTextFormat,

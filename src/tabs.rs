@@ -5,6 +5,7 @@ use std::collections::HashMap;
 
 use crate::browser_pane::BrowserPane;
 use crate::pane_tree::{self, Dir, Layout, Node, PaneId, RectF};
+use crate::renderer::FontSet;
 use crate::term_pane::TermPane;
 
 pub enum PaneKind {
@@ -31,14 +32,25 @@ pub struct Tab {
     pub panes: HashMap<PaneId, Pane>,
     pub active: PaneId,
     pub zoomed: Option<PaneId>,
+    /// Per-tab font zoom. `fonts` is None until the size diverges from the
+    /// window default; it travels with the tab across windows.
+    pub font_size: f32,
+    pub fonts: Option<FontSet>,
 }
 
 impl Tab {
-    pub fn single(pane: Pane) -> Tab {
+    pub fn single(pane: Pane, font_size: f32) -> Tab {
         let pid = pane.id;
         let mut panes = HashMap::new();
         panes.insert(pid, pane);
-        Tab { root: Node::Leaf(pid), panes, active: pid, zoomed: None }
+        Tab {
+            root: Node::Leaf(pid),
+            panes,
+            active: pid,
+            zoomed: None,
+            font_size,
+            fonts: None,
+        }
     }
 
     pub fn title(&self) -> String {

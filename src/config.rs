@@ -41,6 +41,10 @@ pub struct Config {
     /// inactive terminal panes (iTerm2-style split dimming).
     #[serde(default = "default_dim")]
     pub dim_inactive_panes: f32,
+    /// Scrollback history per pane, in lines (primary screen only; the alt
+    /// screen never scrolls back).
+    #[serde(default = "default_scrollback")]
+    pub scrollback_lines: usize,
     #[serde(default)]
     pub default_profile: String,
     #[serde(default)]
@@ -58,6 +62,9 @@ fn default_font_size() -> f32 {
 fn default_dim() -> f32 {
     0.22
 }
+fn default_scrollback() -> usize {
+    10_000
+}
 
 impl Default for Config {
     fn default() -> Self {
@@ -65,6 +72,7 @@ impl Default for Config {
             font_family: default_font_family(),
             font_size: default_font_size(),
             dim_inactive_panes: default_dim(),
+            scrollback_lines: default_scrollback(),
             default_profile: String::new(),
             profiles: Vec::new(),
             scheme: None,

@@ -136,8 +136,12 @@ impl TermPane {
         });
 
         let proxy = EventProxy(shared.clone());
+        let term_config = Config {
+            scrolling_history: crate::app::config().scrollback_lines,
+            ..Config::default()
+        };
         let term = Arc::new(FairMutex::new(Term::new(
-            Config::default(),
+            term_config,
             &TermSize::new(cols as usize, rows as usize),
             proxy.clone(),
         )));

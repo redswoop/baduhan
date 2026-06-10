@@ -29,6 +29,8 @@ pub const WM_APP_DEBUG_ACTION: u32 = WM_APP + 10;
 pub const TABBAR_H: f32 = 38.0;
 pub const TOOLBAR_H: f32 = 34.0;
 pub const PANE_PAD: f32 = 2.0;
+/// Per-pane title bar height, shown only when a tab has multiple panes.
+pub const PANE_TITLE_H: f32 = 22.0;
 const TAB_MAX_W: f32 = 220.0;
 const TAB_MIN_W: f32 = 90.0;
 const PLUS_W: f32 = 28.0;
@@ -40,14 +42,41 @@ enum Drag {
     None,
     Divider { path: Vec<usize>, index: usize, dir: Dir, last: (f32, f32) },
     Tab { idx: usize, press: (f32, f32), cur: (f32, f32), live: bool },
+    /// Dragging a pane by its title bar (iTerm2-style rearrange).
+    Pane { id: PaneId, press: (f32, f32), cur: (f32, f32), live: bool },
     Select,
+}
+
+/// Where a dragged pane would land, plus the preview rect to highlight.
+enum DropTarget {
+    /// Split `target` in `dir`, dragged pane goes before/after.
+    Zone { target: PaneId, dir: Dir, before: bool, preview: RectF },
+    /// Swap places with `target` (drop in its center).
+    Swap { target: PaneId, preview: RectF },
+    /// Drop on the tab bar: pane becomes its own tab.
+    NewTab,
+    Nothing,
+}
+
+/// The pane's content area: below the title bar when title bars are shown.
+fn content_rect(r: RectF, multi: bool) -> RectF {
+    if multi {
+        RectF { x: r.x, y: r.y + PANE_TITLE_H, w: r.w, h: (r.h - PANE_TITLE_H).max(0.0) }
+    } else {
+        r
+    }
+}
+
+fn title_close_rect(r: RectF) -> RectF {
+    RectF { x: r.x + r.w - 22.0, y: r.y, w: 20.0, h: PANE_TITLE_H }
 }
 
 pub struct TermWindow {
     pub hwnd: HWND,
     gfx_win: Option<WindowGfx>,
+    /// Chrome fonts + the default-size cell fonts. Tabs zoomed away from the
+    /// default carry their own FontSet (Tab::fonts).
     pub fonts: FontSet,
-    font_size: f32,
     dpi: f32,
     pub tabs: Vec<Tab>,
     pub active: usize,
@@ -67,15 +96,13 @@ impl TermWindow {
         let dpi = unsafe { GetDpiForWindow(hwnd) } as f32;
         let dpi = if dpi <= 0.0 { 96.0 } else { dpi };
         let cfg = app::config();
-        let font_size = cfg.font_size;
-        let fonts = FontSet::new(&app::gfx(), &cfg.font_family, font_size).expect("fonts");
+        let fonts = FontSet::new(&app::gfx(), &cfg.font_family, cfg.font_size).expect("fonts");
         let edit_font = make_edit_font(dpi);
         let edit_brush = unsafe { CreateSolidBrush(COLORREF(0x002A1E1E)) };
         TermWindow {
             hwnd,
             gfx_win: None,
             fonts,
-            font_size,
             dpi,
             tabs: Vec::new(),
             active: 0,
@@ -92,6 +119,18 @@ impl TermWindow {
 
     fn scale(&self) -> f32 {
         self.dpi / 96.0
+    }
+
+    /// Cell fonts for the active tab (its own zoomed set, or the default).
+    fn cell_fonts(&self) -> &FontSet {
+        self.tabs
+            .get(self.active)
+            .and_then(|t| t.fonts.as_ref())
+            .unwrap_or(&self.fonts)
+    }
+
+    fn active_font_size(&self) -> f32 {
+        self.tabs.get(self.active).map(|t| t.font_size).unwrap_or_else(|| app::config().font_size)
     }
 
     fn client_px(&self) -> (u32, u32) {
@@ -146,7 +185,10 @@ impl TermWindow {
         let pane_id = app::next_id();
         match TermPane::spawn(self.hwnd, pane_id, profile, 100, 30) {
             Ok(tp) => {
-                let tab = Tab::single(Pane { id: pane_id, kind: PaneKind::Term(tp) });
+                let tab = Tab::single(
+                    Pane { id: pane_id, kind: PaneKind::Term(tp) },
+                    app::config().font_size,
+                );
                 self.tabs.push(tab);
                 self.switch_tab(self.tabs.len() - 1);
             },
@@ -319,33 +361,38 @@ impl TermWindow {
     pub fn relayout(&mut self) {
         let area = self.pane_area();
         let scale = self.scale();
-        let (cw, ch) = (self.fonts.cell_w, self.fonts.cell_h);
+        let (cw, ch) = {
+            let f = self.cell_fonts();
+            (f.cell_w, f.cell_h)
+        };
         let Some(tab) = self.tabs.get_mut(self.active) else { return };
         let lay = tab.layout(area);
+        let multi = lay.panes.len() > 1;
         for (id, r) in &lay.panes {
+            let c = content_rect(*r, multi);
             match &mut tab.panes.get_mut(id).map(|p| &mut p.kind) {
                 Some(PaneKind::Term(t)) => {
-                    let cols = (((r.w - 2.0 * PANE_PAD) / cw) as u16).max(2);
-                    let rows = (((r.h - 2.0 * PANE_PAD) / ch) as u16).max(1);
+                    let cols = (((c.w - 2.0 * PANE_PAD) / cw) as u16).max(2);
+                    let rows = (((c.h - 2.0 * PANE_PAD) / ch) as u16).max(1);
                     let cur = *t.shared.size.lock().unwrap();
                     if cur.num_cols != cols || cur.num_lines != rows {
                         t.resize(cols, rows, cw as u16, ch as u16);
                     }
                 },
                 Some(PaneKind::Browser(b)) => {
-                    let (toolbar, _back, _fwd, _reload, _dev, edit) = browser_chrome(*r);
+                    let chrome = browser_chrome(c);
                     let px = |v: f32| (v * scale).round() as i32;
                     let webview_px = RECT {
-                        left: px(r.x),
-                        top: px(toolbar.y + toolbar.h),
-                        right: px(r.x + r.w),
-                        bottom: px(r.y + r.h),
+                        left: px(c.x),
+                        top: px(chrome.toolbar.y + chrome.toolbar.h),
+                        right: px(c.x + c.w),
+                        bottom: px(c.y + c.h),
                     };
                     let edit_px = RECT {
-                        left: px(edit.x),
-                        top: px(edit.y),
-                        right: px(edit.x + edit.w),
-                        bottom: px(edit.y + edit.h),
+                        left: px(chrome.edit.x),
+                        top: px(chrome.edit.y),
+                        right: px(chrome.edit.x + chrome.edit.w),
+                        bottom: px(chrome.edit.y + chrome.edit.h),
                     };
                     b.set_bounds(webview_px, edit_px);
                 },
@@ -433,6 +480,7 @@ impl TermWindow {
         self.draw_tab_bar(win);
 
         if let Some(tab) = self.tabs.get(self.active) {
+            let cell_fonts = tab.fonts.as_ref().unwrap_or(&self.fonts);
             let area = self.pane_area();
             let lay = tab.layout(area);
             let multi = lay.panes.len() > 1;
@@ -449,6 +497,10 @@ impl TermWindow {
                 let Some(pane) = tab.pane(*id) else { continue };
                 let active = *id == tab.active;
                 let prect = rf(r.x, r.y, r.x + r.w, r.y + r.h);
+                let c = content_rect(*r, multi);
+                if multi {
+                    self.draw_pane_title(win, &gfx, pane, *r, active);
+                }
                 match &pane.kind {
                     PaneKind::Term(t) => {
                         t.shared.dirty.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -456,9 +508,9 @@ impl TermWindow {
                         renderer::draw_term(
                             win,
                             &gfx,
-                            &self.fonts,
+                            cell_fonts,
                             &term,
-                            prect,
+                            rf(c.x, c.y, c.x + c.w, c.y + c.h),
                             self.focused && active,
                         );
                         drop(term);
@@ -469,14 +521,99 @@ impl TermWindow {
                         }
                     },
                     PaneKind::Browser(_) => {
-                        self.draw_browser_chrome(win, *r);
+                        self.draw_browser_chrome(win, c);
                     },
                 }
                 if multi && active {
                     win.frame(prect, palette::d2d_a(palette::ACCENT, 0.9), 1.5);
                 }
             }
+
+            // Drop-zone preview while dragging a pane by its title bar.
+            if let Drag::Pane { id, cur, live: true, .. } = &self.drag {
+                match self.drop_target(cur.0, cur.1, *id) {
+                    DropTarget::Zone { preview, .. } => {
+                        let p = rf(preview.x, preview.y, preview.x + preview.w, preview.y + preview.h);
+                        win.fill(p, palette::d2d_a(palette::ACCENT, 0.25));
+                        win.frame(p, palette::d2d_a(palette::ACCENT, 0.9), 2.0);
+                    },
+                    DropTarget::Swap { preview, .. } => {
+                        let p = rf(preview.x, preview.y, preview.x + preview.w, preview.y + preview.h);
+                        win.frame(p, palette::d2d_a(palette::ACCENT, 0.9), 3.0);
+                    },
+                    DropTarget::NewTab => {
+                        let (w, _) = self.client_dips();
+                        win.fill(
+                            rf(0.0, 0.0, w, TABBAR_H),
+                            palette::d2d_a(palette::ACCENT, 0.18),
+                        );
+                    },
+                    DropTarget::Nothing => {},
+                }
+                // Floating chip with the dragged pane's title.
+                if let Some(pane) =
+                    self.tabs.get(self.active).and_then(|t| t.pane(*id))
+                {
+                    let label = pane.title();
+                    let chip = rf(cur.0 + 10.0, cur.1 + 8.0, cur.0 + 150.0, cur.1 + 30.0);
+                    win.rounded(chip, 4.0, palette::d2d_a(palette::TAB_INACTIVE, 0.95));
+                    win.text(
+                        &gfx,
+                        &label,
+                        &self.fonts.ui,
+                        rf(chip.left + 8.0, chip.top, chip.right - 4.0, chip.bottom),
+                        palette::d2d(palette::TAB_TEXT_ACTIVE),
+                    );
+                }
+            }
         }
+    }
+
+    /// Classify where a pane dragged to (x, y) would land.
+    fn drop_target(&self, x: f32, y: f32, dragged: PaneId) -> DropTarget {
+        if y < TABBAR_H {
+            return DropTarget::NewTab;
+        }
+        let Some((target, r)) = self.pane_at(x, y) else { return DropTarget::Nothing };
+        if target == dragged {
+            return DropTarget::Nothing;
+        }
+        // Relative distance to each edge; nearest edge under 30% wins,
+        // otherwise the center zone swaps.
+        let fx = ((x - r.x) / r.w.max(1.0)).clamp(0.0, 1.0);
+        let fy = ((y - r.y) / r.h.max(1.0)).clamp(0.0, 1.0);
+        let edges = [
+            (fx, Dir::Row, true),         // left
+            (1.0 - fx, Dir::Row, false),  // right
+            (fy, Dir::Col, true),         // top
+            (1.0 - fy, Dir::Col, false),  // bottom
+        ];
+        let (d, dir, before) = edges
+            .iter()
+            .copied()
+            .min_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
+            .unwrap();
+        if d > 0.3 {
+            return DropTarget::Swap { target, preview: r };
+        }
+        let preview = match (dir, before) {
+            (Dir::Row, true) => RectF { x: r.x, y: r.y, w: r.w / 2.0, h: r.h },
+            (Dir::Row, false) => RectF { x: r.x + r.w / 2.0, y: r.y, w: r.w / 2.0, h: r.h },
+            (Dir::Col, true) => RectF { x: r.x, y: r.y, w: r.w, h: r.h / 2.0 },
+            (Dir::Col, false) => RectF { x: r.x, y: r.y + r.h / 2.0, w: r.w, h: r.h / 2.0 },
+        };
+        DropTarget::Zone { target, dir, before, preview }
+    }
+
+    /// Move the active tab's pane `id` into its own new tab.
+    fn pane_to_new_tab(&mut self, id: PaneId) {
+        let Some(tab) = self.tabs.get_mut(self.active) else { return };
+        let (font_size, fonts) = (tab.font_size, tab.fonts.clone());
+        let Some(pane) = tab.remove(id) else { return }; // last pane: already its own tab
+        let mut new_tab = Tab::single(pane, font_size);
+        new_tab.fonts = fonts;
+        self.tabs.push(new_tab);
+        self.switch_tab(self.tabs.len() - 1);
     }
 
     fn draw_tab_bar(&self, win: &WindowGfx) {
@@ -546,7 +683,8 @@ impl TermWindow {
 
     fn draw_browser_chrome(&self, win: &WindowGfx, r: RectF) {
         let gfx = app::gfx();
-        let (toolbar, back, fwd, reload, dev, _edit) = browser_chrome(r);
+        let chrome = browser_chrome(r);
+        let toolbar = chrome.toolbar;
         win.fill(
             rf(toolbar.x, toolbar.y, toolbar.x + toolbar.w, toolbar.y + toolbar.h),
             palette::d2d(palette::TOOLBAR_BG),
@@ -560,14 +698,45 @@ impl TermWindow {
                 palette::d2d(palette::TAB_TEXT),
             );
         };
-        btn(&back, "\u{E72B}");
-        btn(&fwd, "\u{E72A}");
-        btn(&reload, "\u{E72C}");
-        btn(&dev, "\u{EC7A}");
+        btn(&chrome.back, "\u{E72B}");
+        btn(&chrome.fwd, "\u{E72A}");
+        btn(&chrome.reload, "\u{E72C}");
+        btn(&chrome.dev, "\u{EC7A}");
+        btn(&chrome.close, "\u{E711}");
         // Body placeholder until WebView2 arrives.
         win.fill(
             rf(r.x, toolbar.y + toolbar.h, r.x + r.w, r.y + r.h),
-            palette::d2d(palette::DEFAULT_BG),
+            palette::d2d(palette::scheme().bg),
+        );
+    }
+
+    /// Per-pane title bar: drag handle + title + close glyph.
+    fn draw_pane_title(&self, win: &WindowGfx, gfx: &crate::renderer::Gfx, pane: &Pane, r: RectF, active: bool) {
+        let bar = rf(r.x, r.y, r.x + r.w, r.y + PANE_TITLE_H);
+        win.fill(bar, palette::d2d(palette::TOOLBAR_BG));
+        let text_color = if active { palette::TAB_TEXT_ACTIVE } else { palette::TAB_TEXT };
+        // Grip dots hint at draggability.
+        win.text(
+            gfx,
+            "\u{E76F}",
+            &self.fonts.icons,
+            rf(r.x + 4.0, r.y, r.x + 20.0, r.y + PANE_TITLE_H),
+            palette::d2d_a(text_color, 0.6),
+        );
+        win.text(
+            gfx,
+            &pane.title(),
+            &self.fonts.ui,
+            rf(r.x + 24.0, r.y, r.x + r.w - 26.0, r.y + PANE_TITLE_H),
+            palette::d2d(text_color),
+        );
+        let cl = title_close_rect(r);
+        win.text(
+            gfx,
+            "\u{E711}",
+            &self.fonts.icons,
+            rf(cl.x, cl.y, cl.x + cl.w, cl.y + cl.h),
+            palette::d2d_a(text_color, 0.7),
         );
     }
 
@@ -577,6 +746,19 @@ impl TermWindow {
         let tab = self.tabs.get(self.active)?;
         let lay = tab.layout(self.pane_area());
         lay.panes.iter().find(|(_, r)| r.contains(x, y)).copied()
+    }
+
+    fn is_multi(&self) -> bool {
+        self.tabs
+            .get(self.active)
+            .map(|t| t.zoomed.is_none() && t.panes.len() > 1)
+            .unwrap_or(false)
+    }
+
+    /// Pane under a point plus its *content* rect (sans title bar).
+    fn pane_content_at(&self, x: f32, y: f32) -> Option<(PaneId, RectF)> {
+        let multi = self.is_multi();
+        self.pane_at(x, y).map(|(id, r)| (id, content_rect(r, multi)))
     }
 
     fn divider_at(&self, x: f32, y: f32) -> Option<pane_tree::Divider> {
@@ -601,8 +783,9 @@ impl TermWindow {
 
     /// Cell under a point inside a terminal pane rect, viewport coords.
     fn cell_at(&self, pane: RectF, x: f32, y: f32) -> (usize, usize, Side) {
-        let cx = ((x - pane.x - PANE_PAD) / self.fonts.cell_w).max(0.0);
-        let cy = ((y - pane.y - PANE_PAD) / self.fonts.cell_h).max(0.0);
+        let f = self.cell_fonts();
+        let cx = ((x - pane.x - PANE_PAD) / f.cell_w).max(0.0);
+        let cy = ((y - pane.y - PANE_PAD) / f.cell_h).max(0.0);
         let side = if cx.fract() < 0.5 { Side::Left } else { Side::Right };
         (cx as usize, cy as usize, side)
     }
@@ -734,15 +917,20 @@ impl TermWindow {
         });
     }
 
+    /// Zoom the *active tab* to `size`; other tabs keep their own zoom.
     fn set_font_size(&mut self, size: f32) {
         let size = size.clamp(7.0, 32.0);
-        if (size - self.font_size).abs() < 0.01 {
+        if (size - self.active_font_size()).abs() < 0.01 {
             return;
         }
-        self.font_size = size;
         let family = self.fonts.family.clone();
-        if let Ok(f) = FontSet::new(&app::gfx(), &family, size) {
-            self.fonts = f;
+        let default_size = app::config().font_size;
+        let Some(tab) = self.tabs.get_mut(self.active) else { return };
+        tab.font_size = size;
+        if (size - default_size).abs() < 0.01 {
+            tab.fonts = None; // back on the shared default set
+        } else if let Ok(f) = FontSet::new(&app::gfx(), &family, size) {
+            tab.fonts = Some(f);
         }
         self.relayout();
         self.invalidate();
@@ -894,11 +1082,11 @@ impl TermWindow {
                     return true;
                 },
                 VK_OEM_PLUS => {
-                    self.set_font_size(self.font_size + 1.0);
+                    self.set_font_size(self.active_font_size() + 1.0);
                     return true;
                 },
                 VK_OEM_MINUS => {
-                    self.set_font_size(self.font_size - 1.0);
+                    self.set_font_size(self.active_font_size() - 1.0);
                     return true;
                 },
                 _ => {},
@@ -1116,6 +1304,29 @@ impl TermWindow {
 
         // Panes.
         if let Some((pane_id, prect)) = self.pane_at(x, y) {
+            let multi = self.is_multi();
+
+            // Pane title bar: close glyph or start a rearrange drag.
+            if multi && y < prect.y + PANE_TITLE_H {
+                if title_close_rect(prect).contains(x, y) {
+                    unsafe {
+                        let _ = ReleaseCapture();
+                    }
+                    self.close_pane_by_id(pane_id);
+                    return;
+                }
+                if let Some(tab) = self.tabs.get_mut(self.active)
+                    && tab.active != pane_id {
+                        tab.active = pane_id;
+                        self.sync_pane_focus();
+                        self.update_title();
+                        self.invalidate();
+                    }
+                self.drag = Drag::Pane { id: pane_id, press: (x, y), cur: (x, y), live: false };
+                return;
+            }
+            let crect = content_rect(prect, multi);
+
             if let Some(tab) = self.tabs.get_mut(self.active)
                 && tab.active != pane_id {
                     tab.active = pane_id;
@@ -1129,21 +1340,27 @@ impl TermWindow {
                 matches!(tab.pane(pane_id).map(|p| &p.kind), Some(PaneKind::Browser(_)))
             };
             if is_browser {
-                let (_, back, fwd, reload, dev, _) = browser_chrome(prect);
+                let chrome = browser_chrome(crect);
+                let mut close = false;
                 let tab = &mut self.tabs[self.active];
                 if let Some(PaneKind::Browser(b)) = tab.pane_mut(pane_id).map(|p| &mut p.kind) {
-                    if back.contains(x, y) {
+                    if chrome.back.contains(x, y) {
                         b.back();
-                    } else if fwd.contains(x, y) {
+                    } else if chrome.fwd.contains(x, y) {
                         b.forward();
-                    } else if reload.contains(x, y) {
+                    } else if chrome.reload.contains(x, y) {
                         b.reload();
-                    } else if dev.contains(x, y) {
+                    } else if chrome.dev.contains(x, y) {
                         b.devtools();
+                    } else if chrome.close.contains(x, y) {
+                        close = true;
                     }
                 }
                 unsafe {
                     let _ = ReleaseCapture();
+                }
+                if close {
+                    self.close_pane_by_id(pane_id);
                 }
                 return;
             }
@@ -1153,13 +1370,13 @@ impl TermWindow {
             }
 
             let mods = Mods::current();
-            if self.mouse_report(pane_id, prect, x, y, 0, true, false, &mods) {
+            if self.mouse_report(pane_id, crect, x, y, 0, true, false, &mods) {
                 self.drag = Drag::None;
                 return;
             }
 
             // Begin text selection.
-            let (col, row, side) = self.cell_at(prect, x, y);
+            let (col, row, side) = self.cell_at(crect, x, y);
             if let Some(tab) = self.tabs.get(self.active)
                 && let Some(PaneKind::Term(t)) = tab.pane(tab.active).map(|p| &p.kind) {
                     let mut term = t.term.lock();
@@ -1182,7 +1399,7 @@ impl TermWindow {
         if y < TABBAR_H {
             return;
         }
-        let Some((pane_id, prect)) = self.pane_at(x, y) else { return };
+        let Some((pane_id, prect)) = self.pane_content_at(x, y) else { return };
         let mods = Mods::current();
         if self.mouse_report(pane_id, prect, x, y, 0, true, false, &mods) {
             return;
@@ -1216,7 +1433,7 @@ impl TermWindow {
                 }
                 // Motion-only mouse reporting (mode 1003).
                 let mods = Mods::current();
-                if let Some((pane_id, prect)) = self.pane_at(x, y) {
+                if let Some((pane_id, prect)) = self.pane_content_at(x, y) {
                     let wants = self
                         .tabs
                         .get(self.active)
@@ -1268,10 +1485,21 @@ impl TermWindow {
                     self.invalidate();
                 }
             },
+            Drag::Pane { press, cur, live, .. } => {
+                *cur = (x, y);
+                if !*live && ((x - press.0).abs() > 6.0 || (y - press.1).abs() > 6.0) {
+                    *live = true;
+                }
+                if *live {
+                    self.invalidate();
+                }
+            },
             Drag::Select => {
+                let multi = self.is_multi();
                 let Some(tab) = self.tabs.get(self.active) else { return };
                 let lay = tab.layout(self.pane_area());
                 let Some(prect) = lay.rect_of(tab.active) else { return };
+                let prect = content_rect(prect, multi);
                 let (col, row, side) = self.cell_at(prect, x, y);
                 if let Some(PaneKind::Term(t)) = tab.pane(tab.active).map(|p| &p.kind) {
                     let mut term = t.term.lock();
@@ -1294,7 +1522,7 @@ impl TermWindow {
         // Drag-motion mouse reporting for terminals (button held).
         if lbutton && matches!(self.drag, Drag::None) {
             let mods = Mods::current();
-            if let Some((pane_id, prect)) = self.pane_at(x, y) {
+            if let Some((pane_id, prect)) = self.pane_content_at(x, y) {
                 self.mouse_report(pane_id, prect, x, y, 0, true, true, &mods);
             }
         }
@@ -1340,6 +1568,35 @@ impl TermWindow {
                 self.detach_tab(idx, Some((pt.x, pt.y)));
                 self.invalidate();
             },
+            Drag::Pane { id, live, .. } => {
+                if !live {
+                    return;
+                }
+                match self.drop_target(x, y, id) {
+                    DropTarget::Zone { target, dir, before, .. } => {
+                        if let Some(tab) = self.tabs.get_mut(self.active)
+                            && pane_tree::move_pane(&mut tab.root, id, target, dir, before)
+                        {
+                            tab.active = id;
+                            tab.zoomed = None;
+                        }
+                    },
+                    DropTarget::Swap { target, .. } => {
+                        if let Some(tab) = self.tabs.get_mut(self.active) {
+                            pane_tree::swap(&mut tab.root, id, target);
+                        }
+                    },
+                    DropTarget::NewTab => {
+                        self.pane_to_new_tab(id);
+                        return; // switch_tab already relaid out
+                    },
+                    DropTarget::Nothing => {},
+                }
+                self.relayout();
+                self.sync_pane_focus();
+                self.update_title();
+                self.invalidate();
+            },
             Drag::Select => {
                 // iTerm2-style copy-on-select.
                 self.copy_selection();
@@ -1347,7 +1604,7 @@ impl TermWindow {
             },
             Drag::None => {
                 let mods = Mods::current();
-                if let Some((pane_id, prect)) = self.pane_at(x, y) {
+                if let Some((pane_id, prect)) = self.pane_content_at(x, y) {
                     self.mouse_report(pane_id, prect, x, y, 0, false, false, &mods);
                 }
             },
@@ -1361,7 +1618,7 @@ impl TermWindow {
             self.show_profile_menu(x, y);
             return;
         }
-        let Some((pane_id, prect)) = self.pane_at(x, y) else { return };
+        let Some((pane_id, prect)) = self.pane_content_at(x, y) else { return };
         let mods = Mods::current();
         if self.mouse_report(pane_id, prect, x, y, 2, true, false, &mods) {
             return;
@@ -1386,14 +1643,14 @@ impl TermWindow {
         // Ctrl+wheel: font zoom (Windows Terminal / browser convention).
         if mods.ctrl && !mods.shift && !mods.alt {
             let step = if delta > 0 { 1.0 } else { -1.0 };
-            self.set_font_size(self.font_size + step);
+            self.set_font_size(self.active_font_size() + step);
             return;
         }
         let lines = (delta as f32 / 120.0 * 3.0).round() as i32;
         if lines == 0 {
             return;
         }
-        let Some((pane_id, prect)) = self.pane_at(x, y) else { return };
+        let Some((pane_id, prect)) = self.pane_content_at(x, y) else { return };
 
         let Some(tab) = self.tabs.get(self.active) else { return };
         let Some(pane) = tab.pane(pane_id) else { return };
@@ -1442,17 +1699,25 @@ impl TermWindow {
                 Dir::Col => IDC_SIZENS,
             }
         } else if let Some((pane_id, prect)) = self.pane_at(x, y) {
-            let is_term = self
-                .tabs
-                .get(self.active)
-                .and_then(|t| t.pane(pane_id))
-                .map(|p| matches!(p.kind, PaneKind::Term(_)))
-                .unwrap_or(false);
-            let (_, _, _, _, _, _e) = browser_chrome(prect);
-            if is_term {
-                IDC_IBEAM
+            if self.is_multi() && y < prect.y + PANE_TITLE_H {
+                // Title bar: drag handle (arrow over the close glyph).
+                if title_close_rect(prect).contains(x, y) {
+                    IDC_ARROW
+                } else {
+                    IDC_SIZEALL
+                }
             } else {
-                IDC_ARROW
+                let is_term = self
+                    .tabs
+                    .get(self.active)
+                    .and_then(|t| t.pane(pane_id))
+                    .map(|p| matches!(p.kind, PaneKind::Term(_)))
+                    .unwrap_or(false);
+                if is_term {
+                    IDC_IBEAM
+                } else {
+                    IDC_ARROW
+                }
             }
         } else {
             IDC_ARROW
@@ -1687,8 +1952,13 @@ impl TermWindow {
                     8 => self.focus_dir(1, 0),
                     9 => self.focus_dir(-1, 0),
                     10 => self.detach_tab(self.active, Some((300, 300))),
-                    11 => self.set_font_size(self.font_size + 2.0),
+                    11 => self.set_font_size(self.active_font_size() + 2.0),
                     12 => self.new_tab_with_profile(lparam.0 as usize),
+                    13 => {
+                        if let Some(tab) = self.tabs.get(self.active) {
+                            self.pane_to_new_tab(tab.active);
+                        }
+                    },
                     _ => {},
                 }
                 Some(LRESULT(0))
@@ -1774,22 +2044,33 @@ fn make_edit_font(dpi: f32) -> HFONT {
     }
 }
 
+pub struct BrowserChrome {
+    pub toolbar: RectF,
+    pub back: RectF,
+    pub fwd: RectF,
+    pub reload: RectF,
+    pub dev: RectF,
+    pub close: RectF,
+    pub edit: RectF,
+}
+
 /// Toolbar geometry for a browser pane (all DIPs):
-/// [back][fwd][reload] [ url edit ............ ] [devtools]
-pub fn browser_chrome(r: RectF) -> (RectF, RectF, RectF, RectF, RectF, RectF) {
+/// [back][fwd][reload] [ url edit ........ ] [devtools][close]
+pub fn browser_chrome(r: RectF) -> BrowserChrome {
     let toolbar = RectF { x: r.x, y: r.y, w: r.w, h: TOOLBAR_H };
     let b = |i: f32| RectF { x: r.x + 4.0 + i * BTN_W, y: r.y + 3.0, w: BTN_W - 4.0, h: TOOLBAR_H - 6.0 };
     let back = b(0.0);
     let fwd = b(1.0);
     let reload = b(2.0);
-    let dev = RectF { x: r.x + r.w - BTN_W, y: r.y + 3.0, w: BTN_W - 4.0, h: TOOLBAR_H - 6.0 };
+    let close = RectF { x: r.x + r.w - BTN_W, y: r.y + 3.0, w: BTN_W - 4.0, h: TOOLBAR_H - 6.0 };
+    let dev = RectF { x: close.x - BTN_W, y: r.y + 3.0, w: BTN_W - 4.0, h: TOOLBAR_H - 6.0 };
     let edit = RectF {
         x: reload.x + reload.w + 6.0,
         y: r.y + 5.0,
         w: (dev.x - reload.x - reload.w - 12.0).max(40.0),
         h: TOOLBAR_H - 10.0,
     };
-    (toolbar, back, fwd, reload, dev, edit)
+    BrowserChrome { toolbar, back, fwd, reload, dev, close, edit }
 }
 
 /// Extent (DIPs) of the split node at `path`, along its own axis.

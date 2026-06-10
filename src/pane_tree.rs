@@ -124,7 +124,12 @@ pub fn collect_leaves(node: &Node) -> Vec<PaneId> {
 
 /// Split the leaf `target`, placing `new_id` after it in direction `dir`.
 pub fn split(root: &mut Node, target: PaneId, dir: Dir, new_id: PaneId) -> bool {
-    fn rec(node: &mut Node, target: PaneId, dir: Dir, new_id: PaneId) -> bool {
+    split_at(root, target, dir, new_id, false)
+}
+
+/// Split the leaf `target`, placing `new_id` before or after it in `dir`.
+pub fn split_at(root: &mut Node, target: PaneId, dir: Dir, new_id: PaneId, before: bool) -> bool {
+    fn rec(node: &mut Node, target: PaneId, dir: Dir, new_id: PaneId, before: bool) -> bool {
         // If this is a split in the same direction containing the target leaf
         // directly, insert a sibling instead of nesting (iTerm2 behavior).
         if let Node::Split { dir: d, fracs, kids } = node {
@@ -134,13 +139,14 @@ pub fn split(root: &mut Node, target: PaneId, dir: Dir, new_id: PaneId) -> bool 
                 ) {
                     let half = fracs[i] / 2.0;
                     fracs[i] = half;
-                    fracs.insert(i + 1, half);
-                    kids.insert(i + 1, Node::Leaf(new_id));
+                    let at = if before { i } else { i + 1 };
+                    fracs.insert(at, half);
+                    kids.insert(at, Node::Leaf(new_id));
                     return true;
                 }
             if let Node::Split { kids, .. } = node {
                 for kid in kids.iter_mut() {
-                    if rec(kid, target, dir, new_id) {
+                    if rec(kid, target, dir, new_id, before) {
                         return true;
                     }
                 }
@@ -149,16 +155,48 @@ pub fn split(root: &mut Node, target: PaneId, dir: Dir, new_id: PaneId) -> bool 
         }
         if matches!(node, Node::Leaf(id) if *id == target) {
             let old = std::mem::replace(node, Node::Leaf(0));
-            *node = Node::Split {
-                dir,
-                fracs: vec![0.5, 0.5],
-                kids: vec![old, Node::Leaf(new_id)],
+            let kids = if before {
+                vec![Node::Leaf(new_id), old]
+            } else {
+                vec![old, Node::Leaf(new_id)]
             };
+            *node = Node::Split { dir, fracs: vec![0.5, 0.5], kids };
             return true;
         }
         false
     }
-    rec(root, target, dir, new_id)
+    rec(root, target, dir, new_id, before)
+}
+
+/// Swap the positions of two leaves (panes keep their identity/content).
+pub fn swap(root: &mut Node, a: PaneId, b: PaneId) -> bool {
+    fn replace(n: &mut Node, from: PaneId, to: PaneId) -> bool {
+        match n {
+            Node::Leaf(id) if *id == from => {
+                *id = to;
+                true
+            },
+            Node::Split { kids, .. } => kids.iter_mut().any(|k| replace(k, from, to)),
+            _ => false,
+        }
+    }
+    if a == b {
+        return false;
+    }
+    const MARK: PaneId = PaneId::MAX;
+    replace(root, a, MARK) && replace(root, b, a) && replace(root, MARK, b)
+}
+
+/// Detach leaf `id` and re-insert it as a split of `target` (the iTerm2
+/// drag-to-rearrange drop). No-op when `id == target` or either is missing.
+pub fn move_pane(root: &mut Node, id: PaneId, target: PaneId, dir: Dir, before: bool) -> bool {
+    if id == target || !collect_leaves(root).contains(&target) {
+        return false;
+    }
+    if !remove(root, id) {
+        return false;
+    }
+    split_at(root, target, dir, id, before)
 }
 
 /// Remove a leaf, collapsing single-child splits. Returns false if `target`
@@ -363,6 +401,53 @@ mod tests {
         assert_eq!(neighbor(&lay, 2, 0, 1), Some(3));
         assert_eq!(neighbor(&lay, 3, -1, 0), Some(1));
         assert_eq!(neighbor(&lay, 1, -1, 0), None);
+    }
+
+    #[test]
+    fn split_before_places_new_pane_first() {
+        let mut root = Node::Leaf(1);
+        split_at(&mut root, 1, Dir::Row, 2, true);
+        assert_eq!(collect_leaves(&root), vec![2, 1]);
+        // Sibling insert before in an existing same-direction split.
+        split_at(&mut root, 1, Dir::Row, 3, true);
+        assert_eq!(collect_leaves(&root), vec![2, 3, 1]);
+    }
+
+    #[test]
+    fn swap_exchanges_leaf_positions() {
+        let mut root = Node::Leaf(1);
+        split(&mut root, 1, Dir::Row, 2);
+        split(&mut root, 2, Dir::Col, 3);
+        assert!(swap(&mut root, 1, 3));
+        assert_eq!(collect_leaves(&root), vec![3, 2, 1]);
+        assert!(!swap(&mut root, 1, 1));
+        assert!(!swap(&mut root, 1, 99));
+    }
+
+    #[test]
+    fn move_pane_detaches_and_reinserts() {
+        // Row [1, 2, 3]; move 1 below 3 → Row [2, Col [3, 1]].
+        let mut root = Node::Leaf(1);
+        split(&mut root, 1, Dir::Row, 2);
+        split(&mut root, 2, Dir::Row, 3);
+        assert!(move_pane(&mut root, 1, 3, Dir::Col, false));
+        assert_eq!(collect_leaves(&root), vec![2, 3, 1]);
+        let lay = layout(&root, AREA, None);
+        let r1 = lay.rect_of(1).unwrap();
+        let r3 = lay.rect_of(3).unwrap();
+        assert_eq!(r1.x, r3.x);
+        assert!(r1.y > r3.y);
+        // Degenerate cases.
+        assert!(!move_pane(&mut root, 1, 1, Dir::Row, false));
+        assert!(!move_pane(&mut root, 1, 42, Dir::Row, false));
+    }
+
+    #[test]
+    fn move_pane_two_panes_reverses_order() {
+        let mut root = Node::Leaf(1);
+        split(&mut root, 1, Dir::Row, 2);
+        assert!(move_pane(&mut root, 1, 2, Dir::Row, false));
+        assert_eq!(collect_leaves(&root), vec![2, 1]);
     }
 
     #[test]
