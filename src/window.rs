@@ -1173,6 +1173,79 @@ impl TermWindow {
         false
     }
 
+    // ----- hyperlinks --------------------------------------------------------
+
+    /// URL under a viewport cell: an OSC 8 hyperlink on the cell, or a plain
+    /// URL token detected in the row text around it.
+    fn link_at(&self, pane_id: PaneId, prect: RectF, x: f32, y: f32) -> Option<String> {
+        let tab = self.tabs.get(self.active)?;
+        let pane = tab.pane(pane_id)?;
+        let PaneKind::Term(t) = &pane.kind else { return None };
+        let (col, row, _) = self.cell_at(prect, x, y);
+        let term = t.term.lock();
+        let cols = term.grid().columns();
+        let lines = term.grid().screen_lines();
+        if col >= cols || row >= lines {
+            return None;
+        }
+        let display_offset = term.grid().display_offset() as i32;
+        let line = Line(row as i32 - display_offset);
+        let cell = &term.grid()[line][Column(col)];
+        if let Some(h) = cell.hyperlink() {
+            return Some(h.uri().to_string());
+        }
+        // Plain-text URL: walk the row, find the whitespace-delimited token
+        // covering the clicked column.
+        let mut text = String::new();
+        let mut cell_to_char: Vec<usize> = Vec::with_capacity(cols);
+        for cx in 0..cols {
+            let c = &term.grid()[line][Column(cx)];
+            cell_to_char.push(text.chars().count());
+            if c.flags.contains(alacritty_terminal::term::cell::Flags::WIDE_CHAR_SPACER) {
+                continue;
+            }
+            text.push(c.c);
+        }
+        drop(term);
+        let chars: Vec<char> = text.chars().collect();
+        let pos = *cell_to_char.get(col)?;
+        if pos >= chars.len() || chars[pos].is_whitespace() {
+            return None;
+        }
+        let mut start = pos;
+        while start > 0 && !chars[start - 1].is_whitespace() {
+            start -= 1;
+        }
+        let mut end = pos;
+        while end + 1 < chars.len() && !chars[end + 1].is_whitespace() {
+            end += 1;
+        }
+        let token: String = chars[start..=end].iter().collect();
+        let token = token.trim_end_matches(['.', ',', ';', ')', ']', '>', '"', '\'']);
+        for scheme in ["https://", "http://", "file://"] {
+            if let Some(i) = token.find(scheme) {
+                return Some(token[i..].to_string());
+            }
+        }
+        if token.starts_with("www.") && token.contains('.') {
+            return Some(format!("https://{token}"));
+        }
+        None
+    }
+
+    fn open_url(&self, url: &str) {
+        unsafe {
+            windows::Win32::UI::Shell::ShellExecuteW(
+                None,
+                windows::core::w!("open"),
+                &HSTRING::from(url),
+                None,
+                None,
+                SW_SHOWNORMAL,
+            );
+        }
+    }
+
     // ----- scrollback search -----------------------------------------------
 
     fn toggle_search(&mut self) {
@@ -1728,6 +1801,18 @@ impl TermWindow {
             }
 
             let mods = Mods::current();
+
+            // Ctrl+click: open the URL under the cursor.
+            if mods.ctrl && !mods.shift && !mods.alt
+                && let Some(url) = self.link_at(pane_id, crect, x, y)
+            {
+                unsafe {
+                    let _ = ReleaseCapture();
+                }
+                self.open_url(&url);
+                return;
+            }
+
             if self.mouse_report(pane_id, crect, x, y, 0, true, false, &mods) {
                 self.drag = Drag::None;
                 return;
@@ -2071,7 +2156,17 @@ impl TermWindow {
                     .and_then(|t| t.pane(pane_id))
                     .map(|p| matches!(p.kind, PaneKind::Term(_)))
                     .unwrap_or(false);
-                if is_term {
+                let mods = Mods::current();
+                if is_term
+                    && mods.ctrl
+                    && !mods.shift
+                    && !mods.alt
+                    && self
+                        .link_at(pane_id, content_rect(prect, self.is_multi()), x, y)
+                        .is_some()
+                {
+                    IDC_HAND
+                } else if is_term {
                     IDC_IBEAM
                 } else {
                     IDC_ARROW
