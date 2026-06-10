@@ -21,7 +21,13 @@ thread_local! {
     static GFX: RefCell<Option<Rc<Gfx>>> = const { RefCell::new(None) };
     static WINDOWS: RefCell<Vec<isize>> = const { RefCell::new(Vec::new()) };
     static CONFIG: RefCell<Option<Rc<Config>>> = const { RefCell::new(None) };
+    /// hwnd hosting the global quake RegisterHotKey (0 = none).
+    static HOTKEY_HOST: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
+    /// The quake dropdown window, if one has been created (0 = none).
+    static QUAKE: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
 }
+
+const QUAKE_HOTKEY_ID: i32 = 0xBA1;
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -108,6 +114,109 @@ fn create_window_init(init: WindowInit, pos: Option<(i32, i32)>, size: Option<(i
             Some(hinstance.into()),
             Some(param),
         );
+    }
+}
+
+/// Host the global quake hotkey on `hwnd` if nobody holds it yet.
+pub fn ensure_quake_hotkey(hwnd: HWND) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::*;
+    if HOTKEY_HOST.with(|h| h.get()) != 0 {
+        return;
+    }
+    let spec = config().quake_hotkey.clone();
+    if spec.is_empty() {
+        return;
+    }
+    let Some(k) = crate::scripting::parse_keyspec(&spec) else {
+        eprintln!("bad quake_hotkey '{spec}'");
+        return;
+    };
+    let mut mods = HOT_KEY_MODIFIERS(MOD_NOREPEAT.0);
+    if k.ctrl {
+        mods |= MOD_CONTROL;
+    }
+    if k.shift {
+        mods |= MOD_SHIFT;
+    }
+    if k.alt {
+        mods |= MOD_ALT;
+    }
+    unsafe {
+        if RegisterHotKey(Some(hwnd), QUAKE_HOTKEY_ID, mods, k.vk as u32).is_ok() {
+            HOTKEY_HOST.with(|h| h.set(hwnd.0 as isize));
+        } else {
+            eprintln!("quake hotkey '{spec}' is taken by another app");
+        }
+    }
+}
+
+/// Toggle the quake dropdown: create on first use, then show/hide.
+pub fn toggle_quake() {
+    use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+    unsafe {
+        let q = QUAKE.with(|c| c.get());
+        if q != 0 && is_registered(HWND(q as *mut _)) {
+            let h = HWND(q as *mut _);
+            if IsWindowVisible(h).as_bool() && GetForegroundWindow() == h {
+                let _ = ShowWindow(h, SW_HIDE);
+            } else {
+                let _ = ShowWindow(h, SW_SHOW);
+                let _ = SetForegroundWindow(h);
+                let _ = SetFocus(Some(h));
+            }
+            return;
+        }
+        // Top 45% of the primary work area, borderless-ish, topmost.
+        let mut work = windows::Win32::Foundation::RECT::default();
+        let _ = SystemParametersInfoW(
+            SPI_GETWORKAREA,
+            0,
+            Some(&mut work as *mut _ as *mut _),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        );
+        let w = work.right - work.left;
+        let h = ((work.bottom - work.top) as f32 * 0.45) as i32;
+        let hinstance = GetModuleHandleW(None).unwrap_or_default();
+        let param = Box::into_raw(Box::new(WindowInit::Fresh)) as *mut core::ffi::c_void;
+        let hwnd = CreateWindowExW(
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+            WIN_CLASS,
+            w!("baduhan — quake"),
+            WS_POPUP | WS_THICKFRAME | WS_VISIBLE,
+            work.left,
+            work.top,
+            w,
+            h,
+            None,
+            None,
+            Some(hinstance.into()),
+            Some(param),
+        );
+        if let Ok(hwnd) = hwnd {
+            QUAKE.with(|c| c.set(hwnd.0 as isize));
+            let _ = SetForegroundWindow(hwnd);
+        }
+    }
+}
+
+/// Bookkeeping when a window dies: free the quake slot and re-home the
+/// global hotkey onto a surviving window.
+fn window_destroyed(hwnd: HWND) {
+    if QUAKE.with(|c| c.get()) == hwnd.0 as isize {
+        QUAKE.with(|c| c.set(0));
+    }
+    if HOTKEY_HOST.with(|h| h.get()) == hwnd.0 as isize {
+        unsafe {
+            let _ = windows::Win32::UI::Input::KeyboardAndMouse::UnregisterHotKey(
+                Some(hwnd),
+                QUAKE_HOTKEY_ID,
+            );
+        }
+        HOTKEY_HOST.with(|h| h.set(0));
+        let survivor = WINDOWS.with(|w| w.borrow().first().copied());
+        if let Some(s) = survivor {
+            ensure_quake_hotkey(HWND(s as *mut _));
+        }
     }
 }
 
@@ -200,7 +309,9 @@ unsafe extern "system" fn wndproc(
         if msg == WM_NCDESTROY {
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
             drop(Box::from_raw(ptr));
-            if unregister(hwnd) {
+            let last = unregister(hwnd);
+            window_destroyed(hwnd);
+            if last {
                 PostQuitMessage(0);
             }
             return DefWindowProcW(hwnd, msg, wparam, lparam);

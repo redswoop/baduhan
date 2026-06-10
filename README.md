@@ -192,6 +192,22 @@ at, so you watch your tests drive the page live inside the terminal.
 | Keys | Action |
 |---|---|
 | `Ctrl+Shift+N` | New window |
+| `` Ctrl+` `` | **Quake mode** — global hotkey toggles a full-width dropdown terminal (config: `quake_hotkey`) |
+
+## Inline images
+
+`baduhan view <img>` (any WIC format: PNG/JPEG/GIF/BMP/WebP) renders the
+picture inline, scrolling with the scrollback. iTerm2's own `imgcat`
+script works unmodified — both the single-sequence `File=` form and the
+modern multipart `MultipartFile=`/`FilePart=`/`FileEnd` protocol are
+implemented. `baduhan view` also reads stdin: `curl -s …/cat.png | baduhan view`.
+
+## Session restore
+
+Closing baduhan saves windows, tabs, split trees, per-tab zoom, shell
+cwds (via OSC 7 / process inspection), and browser URLs to
+`session.json`; launching restores it all, respawning each pane's profile
+in its old directory. `"restore_session": false` disables.
 
 ## Build
 

@@ -52,6 +52,10 @@ pub struct Config {
     /// Reopen last session's windows/tabs/splits (with cwds) on launch.
     #[serde(default = "default_true")]
     pub restore_session: bool,
+    /// Global hotkey toggling the quake-style dropdown terminal
+    /// (e.g. "ctrl+`", "win is not supported"; empty disables).
+    #[serde(default = "default_quake_hotkey")]
+    pub quake_hotkey: String,
     #[serde(default)]
     pub default_profile: String,
     #[serde(default)]
@@ -78,6 +82,9 @@ fn default_cdp_port() -> u16 {
 fn default_true() -> bool {
     true
 }
+fn default_quake_hotkey() -> String {
+    "ctrl+`".into()
+}
 
 impl Default for Config {
     fn default() -> Self {
@@ -88,6 +95,7 @@ impl Default for Config {
             scrollback_lines: default_scrollback(),
             browser_debug_port: default_cdp_port(),
             restore_session: true,
+            quake_hotkey: default_quake_hotkey(),
             default_profile: String::new(),
             profiles: Vec::new(),
             scheme: None,

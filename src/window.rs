@@ -2648,6 +2648,7 @@ impl TermWindow {
         match msg {
             WM_CREATE => {
                 crate::dragdrop::register(self.hwnd);
+                app::ensure_quake_hotkey(self.hwnd);
                 match self.pending_init.take() {
                     Some(app::WindowInit::Adopt(tab)) => self.adopt_tab(tab, None),
                     Some(app::WindowInit::Restore(state)) => self.restore_tabs(state),
@@ -2658,6 +2659,10 @@ impl TermWindow {
             WM_DESTROY => {
                 crate::dragdrop::revoke(self.hwnd);
                 None
+            },
+            WM_HOTKEY => {
+                app::toggle_quake();
+                Some(LRESULT(0))
             },
             WM_APP_DROP_FILES => {
                 let payload = unsafe {

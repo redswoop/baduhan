@@ -71,6 +71,9 @@ pub fn parse_keyspec(s: &str) -> Option<KeySpec> {
         "insert" => 0x2D,
         "delete" => 0x2E,
         "backspace" => 0x08,
+        "`" | "backtick" | "grave" => 0xC0, // VK_OEM_3
+        "-" | "minus" => 0xBD,
+        "=" | "plus" | "equals" => 0xBB,
         _ => {
             let b = k.as_bytes();
             if b.len() == 1 && b[0].is_ascii_alphanumeric() {
