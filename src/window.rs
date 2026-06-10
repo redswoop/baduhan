@@ -1,8 +1,9 @@
 ﻿//! Top-level terminal window: tab bar, pane area, input routing, painting.
 
 use alacritty_terminal::grid::{Dimensions, Scroll};
-use alacritty_terminal::index::{Column, Line, Point, Side};
+use alacritty_terminal::index::{Boundary, Column, Direction, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
+use alacritty_terminal::term::search::{Match, RegexSearch};
 use alacritty_terminal::term::TermMode;
 use windows::core::HSTRING;
 use windows::Win32::Foundation::*;
@@ -73,6 +74,13 @@ fn title_close_rect(r: RectF) -> RectF {
     RectF { x: r.x + r.w - 22.0, y: r.y, w: 20.0, h: PANE_TITLE_H }
 }
 
+/// Scrollback search state (Ctrl+Shift+F overlay).
+struct SearchUi {
+    query: String,
+    dfas: Option<RegexSearch>,
+    found: Option<Match>,
+}
+
 pub struct TermWindow {
     pub hwnd: HWND,
     gfx_win: Option<WindowGfx>,
@@ -85,6 +93,7 @@ pub struct TermWindow {
     focused: bool,
     /// Pane currently holding "terminal focus" (got \x1b[I last).
     focus_pane: Option<PaneId>,
+    search: Option<SearchUi>,
     drag: Drag,
     edit_font: HFONT,
     edit_brush: HBRUSH,
@@ -110,6 +119,7 @@ impl TermWindow {
             active: 0,
             focused: true,
             focus_pane: None,
+            search: None,
             drag: Drag::None,
             edit_font,
             edit_brush,
@@ -577,6 +587,8 @@ impl TermWindow {
                     );
                 }
             }
+
+            self.draw_search_bar(win, &gfx);
         }
     }
 
@@ -1110,6 +1122,11 @@ impl TermWindow {
             return true;
         }
 
+        // Search bar swallows input while open.
+        if self.search.is_some() {
+            return self.search_key(vk, &mods);
+        }
+
         // Scrollback paging.
         if mods.shift && !mods.ctrl && !mods.alt {
             let vkk = VIRTUAL_KEY(vk);
@@ -1154,6 +1171,170 @@ impl TermWindow {
             return true;
         }
         false
+    }
+
+    // ----- scrollback search -----------------------------------------------
+
+    fn toggle_search(&mut self) {
+        if self.search.is_some() {
+            self.close_search();
+            return;
+        }
+        // Prefill from a single-line selection, iTerm2-style.
+        let prefill = self
+            .with_active_term(|t| t.term.lock().selection_to_string())
+            .flatten()
+            .filter(|s| !s.is_empty() && !s.contains('\n'))
+            .map(|s| regex_escape(&s))
+            .unwrap_or_default();
+        self.search = Some(SearchUi { query: prefill, dfas: None, found: None });
+        self.search_refresh();
+    }
+
+    fn close_search(&mut self) {
+        self.search = None;
+        self.invalidate();
+    }
+
+    /// Recompile the query and find the most recent match at/above the
+    /// bottom of the viewport.
+    fn search_refresh(&mut self) {
+        if let Some(s) = &mut self.search {
+            s.dfas = if s.query.is_empty() { None } else { RegexSearch::new(&s.query).ok() };
+            s.found = None;
+            if s.dfas.is_none() {
+                self.with_active_term(|t| t.term.lock().selection = None);
+                self.invalidate();
+                return;
+            }
+        }
+        self.run_search(None, Direction::Left);
+    }
+
+    /// Jump to the next match in `dir` from the current one.
+    fn search_step(&mut self, dir: Direction) {
+        let origin = match self.search.as_ref().and_then(|s| s.found.clone()) {
+            Some(m) => Some(match dir {
+                Direction::Left => *m.start(),
+                Direction::Right => *m.end(),
+            }),
+            None => None,
+        };
+        self.run_search(origin, dir);
+    }
+
+    /// Core search: from `origin` (None = viewport bottom; Some = step one
+    /// cell past it first), select + scroll to the match.
+    fn run_search(&mut self, origin: Option<Point>, dir: Direction) {
+        let Some(tab) = self.tabs.get(self.active) else { return };
+        let Some(t) = tab.active_term() else { return };
+        let Some(s) = &mut self.search else { return };
+        let Some(dfas) = &mut s.dfas else { return };
+
+        let mut term = t.term.lock();
+        let origin = match origin {
+            Some(p) => match dir {
+                Direction::Left => p.sub(term.grid(), Boundary::Grid, 1),
+                Direction::Right => p.add(term.grid(), Boundary::Grid, 1),
+            },
+            None => {
+                let d = term.grid().display_offset() as i32;
+                Point::new(
+                    Line(term.screen_lines() as i32 - 1 - d),
+                    Column(term.grid().columns() - 1),
+                )
+            },
+        };
+        let side = match dir {
+            Direction::Right => Side::Left,
+            Direction::Left => Side::Right,
+        };
+        let m = term.search_next(dfas, origin, dir, side, None);
+        match &m {
+            Some(m) => {
+                term.selection =
+                    Some(Selection::new(SelectionType::Simple, *m.start(), Side::Left));
+                if let Some(sel) = &mut term.selection {
+                    sel.update(*m.end(), Side::Right);
+                }
+                // Scroll the match's line into view.
+                let line = m.start().line.0;
+                let d = term.grid().display_offset() as i32;
+                let screen = term.screen_lines() as i32;
+                if line < -d {
+                    term.scroll_display(Scroll::Delta(-d - line));
+                } else if line > screen - 1 - d {
+                    term.scroll_display(Scroll::Delta(screen - 1 - d - line));
+                }
+            },
+            None => term.selection = None,
+        }
+        drop(term);
+        s.found = m;
+        self.invalidate();
+    }
+
+    /// Keys while the search bar is open. Returns true when consumed.
+    fn search_key(&mut self, vk: u16, m: &Mods) -> bool {
+        let vkk = VIRTUAL_KEY(vk);
+        match vkk {
+            VK_ESCAPE => self.close_search(),
+            VK_RETURN | VK_F3 => {
+                self.search_step(if m.shift { Direction::Right } else { Direction::Left });
+            },
+            VK_UP => self.search_step(Direction::Left),
+            VK_DOWN => self.search_step(Direction::Right),
+            VK_BACK => {
+                if let Some(s) = &mut self.search {
+                    s.query.pop();
+                }
+                self.search_refresh();
+            },
+            _ if m.ctrl && vk as u8 == b'V' => {
+                if let Ok(text) = arboard::Clipboard::new().and_then(|mut cb| cb.get_text())
+                    && let Some(line) = text.lines().next()
+                    && let Some(s) = &mut self.search
+                {
+                    s.query.push_str(line);
+                    self.search_refresh();
+                }
+                self.suppress_char = true;
+            },
+            // Everything else is blocked from the shell; printable chars
+            // arrive via WM_CHAR and edit the query there.
+            _ => {},
+        }
+        true
+    }
+
+    fn draw_search_bar(&self, win: &WindowGfx, gfx: &crate::renderer::Gfx) {
+        let Some(s) = &self.search else { return };
+        let Some(tab) = self.tabs.get(self.active) else { return };
+        let lay = tab.layout(self.pane_area());
+        let multi = lay.panes.len() > 1;
+        let Some(r) = lay.rect_of(tab.active) else { return };
+        let c = content_rect(r, multi);
+        let w = 280.0_f32.min(c.w - 16.0);
+        let bar = rf(c.x + c.w - w - 8.0, c.y + 6.0, c.x + c.w - 8.0, c.y + 34.0);
+        win.rounded(bar, 5.0, palette::d2d_a(palette::TOOLBAR_BG, 0.97));
+        let miss = !s.query.is_empty() && s.found.is_none();
+        let border = if miss { palette::rgb(0xE7, 0x48, 0x56) } else { palette::ACCENT };
+        win.frame(bar, palette::d2d_a(border, 0.9), 1.0);
+        win.text(
+            gfx,
+            "\u{E721}", // magnifier
+            &self.fonts.icons,
+            rf(bar.left + 4.0, bar.top, bar.left + 24.0, bar.bottom),
+            palette::d2d(palette::TAB_TEXT),
+        );
+        let text = format!("{}\u{2595}", s.query);
+        win.text(
+            gfx,
+            &text,
+            &self.fonts.ui,
+            rf(bar.left + 28.0, bar.top, bar.right - 6.0, bar.bottom),
+            palette::d2d(if miss { palette::rgb(0xE7, 0x48, 0x56) } else { palette::TAB_TEXT_ACTIVE }),
+        );
     }
 
     /// Execute an action queued by a Lua keybind callback.
@@ -1217,6 +1398,7 @@ impl TermWindow {
                 },
                 b'C' => self.copy_selection(),
                 b'V' => self.paste(),
+                b'F' => self.toggle_search(),
                 c @ b'1'..=b'9' => {
                     // New tab with profile N (Windows Terminal muscle memory).
                     self.new_tab_with_profile((c - b'1') as usize);
@@ -1321,6 +1503,18 @@ impl TermWindow {
         }
         // Handled in WM_KEYDOWN already.
         if matches!(code, 0x0d | 0x09 | 0x08 | 0x1b) {
+            return;
+        }
+        // Search bar edits its query instead of feeding the shell.
+        if self.search.is_some() {
+            if code >= 0x20 && code != 0x7f
+                && let Some(ch) = char::from_u32(code as u32)
+            {
+                if let Some(s) = &mut self.search {
+                    s.query.push(ch);
+                }
+                self.search_refresh();
+            }
             return;
         }
         // Surrogate pairs arrive as two WM_CHARs.
@@ -2155,6 +2349,7 @@ impl TermWindow {
                             self.pane_to_new_tab(tab.active);
                         }
                     },
+                    15 => self.toggle_search(),
                     14 => {
                         // Simulate a file drop on the active pane's center;
                         // lparam: 0 paste, 1 copy, 2 move.
@@ -2243,6 +2438,18 @@ fn loword(v: u32) -> u16 {
 
 fn hiword(v: u32) -> u16 {
     ((v >> 16) & 0xffff) as u16
+}
+
+/// Escape regex metacharacters so selection prefill searches literally.
+fn regex_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if "\\.+*?()|[]{}^$#&-~".contains(c) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// Quote a Windows path for the target shell flavor.

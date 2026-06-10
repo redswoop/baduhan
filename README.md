@@ -90,6 +90,7 @@ proportional.
 | `Ctrl+Shift+C` / `Ctrl+Shift+V` | Copy / paste (bracketed paste aware) |
 | Mouse selection | Copy-on-select; double-click selects a word |
 | Right-click | Copy selection if any, else paste |
+| `Ctrl+Shift+F` | Search scrollback (regex; prefills from selection). `Enter`/`↑` older, `Shift+Enter`/`↓` newer, `Esc` closes |
 | `Shift+PgUp` / `Shift+PgDn` | Scrollback paging |
 | `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | Font size bigger / smaller / reset |
 | `Ctrl+wheel` | Font zoom |
