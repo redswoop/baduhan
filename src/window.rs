@@ -304,10 +304,19 @@ impl TermWindow {
         self.switch_tab(new_active);
     }
 
+    /// Tab title with the init.lua tab_title hook applied.
+    fn styled_tab_title(&self, tab: &Tab) -> String {
+        let t = tab.title();
+        crate::scripting::format_title(&t).unwrap_or(t)
+    }
+
     fn update_title(&self) {
         if let Some(tab) = self.tabs.get(self.active) {
             unsafe {
-                let _ = SetWindowTextW(self.hwnd, &HSTRING::from(format!("{} — baduhan", tab.title())));
+                let _ = SetWindowTextW(
+                    self.hwnd,
+                    &HSTRING::from(format!("{} — baduhan", self.styled_tab_title(tab))),
+                );
             }
         }
     }
@@ -776,7 +785,7 @@ impl TermWindow {
             win.fill(rf(r.x + 6.0, r.y, r.x + r.w - 6.0, r.y + 2.0), palette::d2d(palette::ACCENT));
         }
         let tab = &self.tabs[i];
-        let mut title = tab.title();
+        let mut title = self.styled_tab_title(tab);
         if tab.zoomed.is_some() {
             title = format!("\u{2922} {title}");
         }
@@ -1147,7 +1156,45 @@ impl TermWindow {
         false
     }
 
+    /// Execute an action queued by a Lua keybind callback.
+    fn run_action(&mut self, a: crate::scripting::Action) {
+        use crate::scripting::Action;
+        match a {
+            Action::NewTab(None) => self.new_tab(),
+            Action::NewTab(Some(name)) => {
+                let idx = app::config().profiles.iter().position(|p| p.name == name);
+                match idx {
+                    Some(i) => self.new_tab_with_profile(i),
+                    None => eprintln!("init.lua: unknown profile '{name}'"),
+                }
+            },
+            Action::Split(dir) => self.split(dir, false),
+            Action::Browse(url) => {
+                if let Some(pane) = self.tabs.get(self.active).map(|t| t.active) {
+                    let req =
+                        crate::ctl::CtlReq { pane, verb: "browse".into(), arg: url };
+                    self.handle_ctl(&req);
+                }
+            },
+            Action::FontDelta(d) => self.set_font_size(self.active_font_size() + d),
+            Action::SendText(s) => {
+                self.with_active_term(|t| t.pty.write(s.as_bytes()));
+            },
+        }
+    }
+
     fn hotkey(&mut self, vk: u16, m: &Mods) -> bool {
+        // User keybindings from init.lua run first and may shadow built-ins.
+        if let Some(actions) = crate::scripting::handle_key(vk, m) {
+            for a in actions {
+                self.run_action(a);
+            }
+            if (vk as u8).is_ascii_alphanumeric() {
+                self.suppress_char = true;
+            }
+            return true;
+        }
+
         let vkk = VIRTUAL_KEY(vk);
 
         if m.ctrl && m.shift && !m.alt {

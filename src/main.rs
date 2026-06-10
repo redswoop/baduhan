@@ -14,6 +14,7 @@ mod palette;
 mod pane_tree;
 mod pty;
 mod renderer;
+mod scripting;
 mod tabs;
 mod term_pane;
 mod vt_tests;

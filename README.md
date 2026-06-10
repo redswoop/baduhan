@@ -102,6 +102,32 @@ proportional.
 | `Enter` in URL bar | Navigate — bare words search, `localhost:…` gets `http://` |
 | Toolbar `✕` | Close the browser pane |
 
+## Scripting (Lua)
+
+`%APPDATA%\baduhan\init.lua` runs at startup (wezterm-style) with a
+`baduhan` global:
+
+```lua
+-- Override anything from settings.json:
+baduhan.config.font_size = 14
+baduhan.config.default_profile = "Ubuntu"
+
+-- Add or replace profiles:
+baduhan.profile { name = "Logs", command = { "wsl.exe", "-d", "Ubuntu", "-e", "journalctl", "-f" } }
+
+-- Custom keybindings (run before built-ins, so they can shadow them):
+baduhan.keybind("ctrl+shift+g", function(win)
+  win:browse("github.com")     -- this tab's browser pane (split if needed)
+  -- also: win:new_tab("Ubuntu") · win:split("down") · win:font_size(2)
+  --       win:send("ls\n")
+end)
+
+-- Hooks:
+baduhan.on("tab_title", function(t) return "λ " .. t end)
+```
+
+Script errors are reported to stderr and never take the terminal down.
+
 ## Drag & drop
 
 Drop files from Explorer onto a pane:

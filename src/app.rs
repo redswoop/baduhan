@@ -42,7 +42,8 @@ pub fn config() -> Rc<Config> {
     CONFIG.with(|c| {
         c.borrow_mut()
             .get_or_insert_with(|| {
-                let cfg = Config::load_or_create();
+                let mut cfg = Config::load_or_create();
+                crate::scripting::init(&mut cfg);
                 crate::palette::set_scheme(cfg.scheme());
                 Rc::new(cfg)
             })
