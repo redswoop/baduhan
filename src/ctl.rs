@@ -50,8 +50,14 @@ pub fn run(args: &[String]) -> ! {
         "reload" => ("reload", String::new()),
         "devtools" => ("devtools", String::new()),
         "view" | "imgcat" => {
-            let Some(path) = args.get(1) else { usage() };
-            match view_image(path) {
+            // imgcat semantics: files as args, or stdin when none / "-".
+            let files = &args[1..];
+            let result = if files.is_empty() || files == ["-"] {
+                view_stdin()
+            } else {
+                files.iter().try_for_each(|f| view_image(f))
+            };
+            match result {
                 Ok(()) => std::process::exit(0),
                 Err(e) => {
                     eprintln!("baduhan view: {e}");
@@ -87,76 +93,32 @@ pub fn run(args: &[String]) -> ! {
     std::process::exit(1);
 }
 
-/// Emit an image as an iTerm2 inline-image escape on stdout (imgcat clone).
-/// Non-PNG inputs are transcoded to PNG via WIC so the terminal side only
-/// ever parses one container.
+/// Emit an image as an iTerm2 inline-image escape on stdout — exactly what
+/// iTerm2's imgcat does. Raw bytes pass through; the terminal sizes/decodes
+/// any WIC-supported format (PNG/JPEG/GIF/BMP/WebP/…).
 fn view_image(path: &str) -> anyhow::Result<()> {
+    emit_inline(&std::fs::read(path)?)
+}
+
+fn view_stdin() -> anyhow::Result<()> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::io::stdin().lock().read_to_end(&mut bytes)?;
+    emit_inline(&bytes)
+}
+
+fn emit_inline(bytes: &[u8]) -> anyhow::Result<()> {
     use std::io::Write;
-    let bytes = std::fs::read(path)?;
-    let png = if crate::images::png_dimensions(&bytes).is_some() {
-        bytes
-    } else {
-        wic_to_png(&bytes)?
-    };
+    anyhow::ensure!(!bytes.is_empty(), "empty input");
     let mut stdout = std::io::stdout().lock();
     write!(
         stdout,
         "\x1b]1337;File=inline=1;size={}:{}\x07",
-        png.len(),
-        crate::images::b64_encode(&png)
+        bytes.len(),
+        crate::images::b64_encode(bytes)
     )?;
     stdout.flush()?;
     Ok(())
-}
-
-/// Transcode any WIC-decodable image to PNG in memory.
-fn wic_to_png(bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
-    use windows::core::Interface;
-    use windows::Win32::Graphics::Imaging::*;
-    use windows::Win32::System::Com::*;
-    use windows::Win32::UI::Shell::SHCreateMemStream;
-    unsafe {
-        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-        let wic: IWICImagingFactory =
-            CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)?;
-        let in_stream =
-            SHCreateMemStream(Some(bytes)).ok_or_else(|| anyhow::anyhow!("stream"))?;
-        let decoder =
-            wic.CreateDecoderFromStream(&in_stream, std::ptr::null(), WICDecodeMetadataCacheOnDemand)?;
-        let frame = decoder.GetFrame(0)?;
-
-        let out_stream =
-            SHCreateMemStream(None).ok_or_else(|| anyhow::anyhow!("stream"))?;
-        let encoder = wic.CreateEncoder(&GUID_ContainerFormatPng, std::ptr::null())?;
-        encoder.Initialize(&out_stream, WICBitmapEncoderNoCache)?;
-        let mut out_frame = None;
-        encoder.CreateNewFrame(&mut out_frame, std::ptr::null_mut())?;
-        let out_frame = out_frame.ok_or_else(|| anyhow::anyhow!("no frame"))?;
-        out_frame.Initialize(None)?;
-        out_frame.WriteSource(&frame.cast::<IWICBitmapSource>()?, std::ptr::null())?;
-        out_frame.Commit()?;
-        encoder.Commit()?;
-
-        // Read the stream back.
-        use windows::Win32::System::Com::STREAM_SEEK_SET;
-        out_stream.Seek(0, STREAM_SEEK_SET, None)?;
-        let mut out = Vec::new();
-        let mut buf = [0u8; 64 * 1024];
-        loop {
-            let mut read = 0u32;
-            let hr = out_stream.Read(
-                buf.as_mut_ptr() as *mut _,
-                buf.len() as u32,
-                Some(&mut read),
-            );
-            if read == 0 {
-                hr.ok()?;
-                break;
-            }
-            out.extend_from_slice(&buf[..read as usize]);
-        }
-        Ok(out)
-    }
 }
 
 /// Send the payload to each baduhan top-level window until one handles it.

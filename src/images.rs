@@ -8,6 +8,10 @@
 
 use std::sync::Arc;
 
+/// All inline-image traffic arrives as OSC 1337 sub-commands: `File=` (one
+/// giant sequence) or imgcat's default multipart form (`MultipartFile=` →
+/// `FilePart=`× → `FileEnd`).
+pub const PREFIX: &[u8] = b"\x1b]1337;";
 pub const MARKER: &[u8] = b"\x1b]1337;File=";
 
 pub struct InlineImage {
@@ -37,8 +41,10 @@ pub enum Seg {
 #[derive(Default)]
 pub struct ImgScan {
     /// Payload collected so far for a sequence whose terminator we haven't
-    /// seen yet (starts after the marker).
+    /// seen yet (starts after the `OSC 1337;` prefix).
     pending: Option<Vec<u8>>,
+    /// Accumulated base64 from a MultipartFile transfer in progress.
+    multipart: Option<Vec<u8>>,
 }
 
 impl ImgScan {
@@ -50,7 +56,7 @@ impl ImgScan {
             match find_terminator(rest) {
                 Some((end, skip)) => {
                     buf.extend_from_slice(&rest[..end]);
-                    if let Some(img) = parse_payload(&buf) {
+                    if let Some(img) = self.classify(&buf) {
                         out.push(Seg::Image(img));
                     }
                     rest = &rest[end + skip..];
@@ -69,7 +75,7 @@ impl ImgScan {
         }
 
         loop {
-            match find_subslice(rest, MARKER) {
+            match find_subslice(rest, PREFIX) {
                 None => {
                     if !rest.is_empty() {
                         out.push(Seg::Plain(rest.to_vec()));
@@ -80,10 +86,10 @@ impl ImgScan {
                     if start > 0 {
                         out.push(Seg::Plain(rest[..start].to_vec()));
                     }
-                    let payload = &rest[start + MARKER.len()..];
+                    let payload = &rest[start + PREFIX.len()..];
                     match find_terminator(payload) {
                         Some((end, skip)) => {
-                            if let Some(img) = parse_payload(&payload[..end]) {
+                            if let Some(img) = self.classify(&payload[..end]) {
                                 out.push(Seg::Image(img));
                             }
                             rest = &payload[end + skip..];
@@ -97,6 +103,33 @@ impl ImgScan {
             }
         }
         out
+    }
+
+    /// Dispatch one complete OSC 1337 payload. Non-image sub-commands
+    /// (RemoteHost, SetUserVar, …) are consumed silently — alacritty would
+    /// ignore them anyway.
+    fn classify(&mut self, payload: &[u8]) -> Option<ParsedImage> {
+        if let Some(rest) = payload.strip_prefix(b"File=") {
+            return parse_file_payload(rest);
+        }
+        if payload.starts_with(b"MultipartFile=") {
+            self.multipart = Some(Vec::new());
+            return None;
+        }
+        if let Some(part) = payload.strip_prefix(b"FilePart=") {
+            if let Some(buf) = &mut self.multipart {
+                buf.extend_from_slice(part);
+                if buf.len() > 96 * 1024 * 1024 {
+                    self.multipart = None; // runaway
+                }
+            }
+            return None;
+        }
+        if payload.starts_with(b"FileEnd") {
+            let b64 = self.multipart.take()?;
+            return image_from_bytes(b64_decode(&b64)?);
+        }
+        None
     }
 }
 
@@ -117,19 +150,45 @@ fn find_terminator(bytes: &[u8]) -> Option<(usize, usize)> {
     None
 }
 
-/// `inline=1;size=N:BASE64` → decoded image with dimensions.
-fn parse_payload(payload: &[u8]) -> Option<ParsedImage> {
+/// `inline=1;size=N:BASE64` → decoded image with dimensions. Accepts
+/// anything iTerm2's imgcat sends: PNG sized via IHDR, every other format
+/// sized via WIC (the renderer decodes through WIC anyway).
+fn parse_file_payload(payload: &[u8]) -> Option<ParsedImage> {
     let colon = payload.iter().position(|b| *b == b':')?;
     let args = std::str::from_utf8(&payload[..colon]).ok()?;
     if !args.split(';').any(|a| a.trim() == "inline=1") {
         return None; // download-only transfer; not displayed
     }
-    let data = b64_decode(&payload[colon + 1..])?;
-    let (width, height) = png_dimensions(&data)?;
+    image_from_bytes(b64_decode(&payload[colon + 1..])?)
+}
+
+fn image_from_bytes(data: Vec<u8>) -> Option<ParsedImage> {
+    let (width, height) = png_dimensions(&data).or_else(|| wic_dimensions(&data))?;
     if width == 0 || height == 0 || width > 16384 || height > 16384 {
         return None;
     }
     Some(ParsedImage { png: data, width, height })
+}
+
+/// Image dimensions via WIC for non-PNG formats (JPEG/GIF/BMP/WebP/…).
+/// Runs on the PTY reader thread; COM is initialized MTA on first use.
+pub fn wic_dimensions(data: &[u8]) -> Option<(u32, u32)> {
+    use windows::Win32::Graphics::Imaging::*;
+    use windows::Win32::System::Com::*;
+    use windows::Win32::UI::Shell::SHCreateMemStream;
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let wic: IWICImagingFactory =
+            CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).ok()?;
+        let stream = SHCreateMemStream(Some(data))?;
+        let decoder = wic
+            .CreateDecoderFromStream(&stream, std::ptr::null(), WICDecodeMetadataCacheOnDemand)
+            .ok()?;
+        let frame = decoder.GetFrame(0).ok()?;
+        let (mut w, mut h) = (0u32, 0u32);
+        frame.GetSize(&mut w, &mut h).ok()?;
+        Some((w, h))
+    }
 }
 
 /// Width/height from a PNG IHDR.
@@ -253,6 +312,57 @@ mod tests {
         assert_eq!(segs.len(), 2);
         assert!(matches!(&segs[0], Seg::Image(i) if i.width == 7));
         assert!(matches!(&segs[1], Seg::Plain(p) if p == b"done"));
+    }
+
+    #[test]
+    fn multipart_imgcat_protocol() {
+        // Exactly what modern imgcat emits: MultipartFile header, b64 folded
+        // into 200-char FilePart chunks, FileEnd.
+        let png = tiny_png();
+        let b64 = b64_encode(&png);
+        let mut input = Vec::new();
+        input.extend_from_slice(b"\x1b]1337;MultipartFile=inline=1;size=999\x07");
+        for chunk in b64.as_bytes().chunks(200) {
+            input.extend_from_slice(b"\x1b]1337;FilePart=");
+            input.extend_from_slice(chunk);
+            input.push(0x07);
+        }
+        input.extend_from_slice(b"\x1b]1337;FileEnd\x07");
+        input.extend_from_slice(b"\nprompt$ ");
+
+        let mut scan = ImgScan::default();
+        // Feed in awkward 37-byte chunks to exercise the pending path.
+        let mut segs = Vec::new();
+        for c in input.chunks(37) {
+            segs.extend(scan.feed(c));
+        }
+        let images: Vec<&ParsedImage> = segs
+            .iter()
+            .filter_map(|s| match s {
+                Seg::Image(i) => Some(i),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(images.len(), 1);
+        assert_eq!((images[0].width, images[0].height), (7, 3));
+        // Trailing plain text survives.
+        let plain: Vec<u8> = segs
+            .iter()
+            .filter_map(|s| match s {
+                Seg::Plain(p) => Some(p.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(plain, b"\nprompt$ ");
+    }
+
+    #[test]
+    fn shell_integration_1337_subcommands_are_consumed() {
+        let mut scan = ImgScan::default();
+        let segs = scan.feed(b"\x1b]1337;RemoteHost=user@host\x07ok");
+        assert_eq!(segs.len(), 1);
+        assert!(matches!(&segs[0], Seg::Plain(p) if p == b"ok"));
     }
 
     #[test]
