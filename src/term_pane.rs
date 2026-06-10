@@ -122,11 +122,22 @@ fn ctl_env(pane_id: u64) -> Vec<(String, String)> {
             wslenv.push_str(add);
         }
     }
-    vec![
+    let mut env = vec![
         ("BADUHAN_PANE".into(), pane_id.to_string()),
         ("BADUHAN_EXE".into(), exe),
         ("WSLENV".into(), wslenv),
-    ]
+    ];
+    let cdp = crate::app::config().browser_debug_port;
+    if cdp != 0 {
+        env.push(("BADUHAN_CDP".into(), format!("http://127.0.0.1:{cdp}")));
+        if let Some((_, w)) = env.iter_mut().find(|(k, _)| k == "WSLENV") {
+            if !w.is_empty() {
+                w.push(':');
+            }
+            w.push_str("BADUHAN_CDP");
+        }
+    }
+    env
 }
 
 pub struct TermPane {

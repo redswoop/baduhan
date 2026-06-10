@@ -66,6 +66,17 @@ fn request_controller(hwnd: HWND, pane_id: u64) {
                 let data_dir = std::env::var("LOCALAPPDATA")
                     .map(|d| format!("{d}\\baduhan-webview2"))
                     .unwrap_or_else(|_| ".baduhan-webview2".into());
+                // Expose CDP so Playwright/claude can drive the embedded
+                // browser (read by the WebView2 loader at env creation).
+                let cdp_port = crate::app::config().browser_debug_port;
+                if cdp_port != 0 {
+                    unsafe {
+                        std::env::set_var(
+                            "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
+                            format!("--remote-debugging-port={cdp_port}"),
+                        );
+                    }
+                }
                 let handler = CreateCoreWebView2EnvironmentCompletedHandler::create(Box::new(
                     move |result, environment| {
                         if result.is_ok()

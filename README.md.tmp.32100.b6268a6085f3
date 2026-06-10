@@ -38,10 +38,8 @@ and every registered WSL distro. Delete the file to re-import.
 ```jsonc
 {
   "font_family": "JetBrainsMonoNL Nerd Font",
-  "font_size": 13.0,                   // Ctrl+=/− and Ctrl+wheel zoom per tab
+  "font_size": 13.0,
   "dim_inactive_panes": 0.22,          // 0.0 disables split dimming
-  "scrollback_lines": 10000,           // per pane; alt screen never scrolls
-  "browser_debug_port": 9333,          // CDP for Playwright etc.; 0 disables
   "default_profile": "Git Bash",
   "profiles": [
     { "name": "Git Bash", "command": ["C:\\Program Files\\Git\\bin\\bash.exe", "-i", "-l"] },
@@ -100,38 +98,6 @@ proportional.
 | `Ctrl+L` | Focus the URL bar (when a browser pane is active) |
 | `F12` | DevTools |
 | `Enter` in URL bar | Navigate — bare words search, `localhost:…` gets `http://` |
-| Toolbar `✕` | Close the browser pane |
-
-## The dev browser
-
-The browser pane is built to sit next to your dev server — and to be driven
-from the shell and from test tooling.
-
-**From any shell pane** (the env vars flow into WSL too, via WSLENV):
-
-```bash
-"$BADUHAN_EXE" browse localhost:5173   # load a URL in this tab's browser
-                                       # (creates a browser split if needed)
-"$BADUHAN_EXE" reload                  # reload it — bind it to a file watcher
-"$BADUHAN_EXE" devtools                # pop DevTools
-"$BADUHAN_EXE" cdp                     # print the CDP endpoint URL
-alias bb='"$BADUHAN_EXE" browse'       # taste
-```
-
-**From Playwright / puppeteer / claude** — the embedded browser exposes the
-Chrome DevTools Protocol on `browser_debug_port` (default 9333, `0`
-disables; also exported as `$BADUHAN_CDP`):
-
-```js
-const { chromium } = require('playwright-core');
-const browser = await chromium.connectOverCDP(process.env.BADUHAN_CDP);
-const page = browser.contexts()[0].pages()[0];
-await page.goto('http://localhost:5173');
-await page.screenshot({ path: 'shot.png' });
-```
-
-No browser download needed — Playwright attaches to the pane you're looking
-at, so you watch your tests drive the page live inside the terminal.
 
 ### Windows
 | Keys | Action |
@@ -172,7 +138,7 @@ the WebView2 runtime, which ships with Windows 11 and Edge.
 - `WM_APP+10` wparam=N drives actions programmatically: 1 split-right,
   2 split-down, 3 new-tab, 4 browser-split, 5 next-tab, 6 zoom, 7 close-pane,
   8/9 focus right/left, 10 detach-tab, 11 font+, 12 new-tab-with-profile
-  (lparam = profile index), 13 active-pane-to-new-tab.
+  (lparam = profile index).
 
 ## License
 

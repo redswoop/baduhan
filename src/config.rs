@@ -45,6 +45,10 @@ pub struct Config {
     /// screen never scrolls back).
     #[serde(default = "default_scrollback")]
     pub scrollback_lines: usize,
+    /// Chrome DevTools Protocol port for the embedded browser (Playwright's
+    /// connectOverCDP, claude --chrome, etc.). 0 disables.
+    #[serde(default = "default_cdp_port")]
+    pub browser_debug_port: u16,
     #[serde(default)]
     pub default_profile: String,
     #[serde(default)]
@@ -65,6 +69,9 @@ fn default_dim() -> f32 {
 fn default_scrollback() -> usize {
     10_000
 }
+fn default_cdp_port() -> u16 {
+    9333
+}
 
 impl Default for Config {
     fn default() -> Self {
@@ -73,6 +80,7 @@ impl Default for Config {
             font_size: default_font_size(),
             dim_inactive_panes: default_dim(),
             scrollback_lines: default_scrollback(),
+            browser_debug_port: default_cdp_port(),
             default_profile: String::new(),
             profiles: Vec::new(),
             scheme: None,

@@ -34,7 +34,8 @@ pub fn run(args: &[String]) -> ! {
             "usage (inside a baduhan pane):\n  \
              baduhan browse <url>   load a URL in this tab's browser pane\n  \
              baduhan reload         reload this tab's browser pane\n  \
-             baduhan devtools       open DevTools for this tab's browser pane"
+             baduhan devtools       open DevTools for this tab's browser pane\n  \
+             baduhan cdp            print the Chrome DevTools Protocol endpoint"
         );
         std::process::exit(2);
     };
@@ -47,6 +48,16 @@ pub fn run(args: &[String]) -> ! {
         },
         "reload" => ("reload", String::new()),
         "devtools" => ("devtools", String::new()),
+        "cdp" => {
+            // No window round-trip needed; the port lives in the config.
+            let port = crate::config::Config::load_or_create().browser_debug_port;
+            if port == 0 {
+                eprintln!("baduhan cdp: disabled (browser_debug_port = 0 in settings.json)");
+                std::process::exit(1);
+            }
+            println!("http://127.0.0.1:{port}");
+            std::process::exit(0);
+        },
         _ => usage(),
     };
 
