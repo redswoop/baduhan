@@ -553,7 +553,24 @@ impl TermWindow {
                             rf(c.x, c.y, c.x + c.w, c.y + c.h),
                             self.focused && active,
                         );
+                        // Inline images, anchored to the pane's line clock.
+                        let drawable = visible_images(t, &term, c, cell_fonts);
                         drop(term);
+                        if !drawable.is_empty() {
+                            let clip = rf(c.x, c.y, c.x + c.w, c.y + c.h);
+                            unsafe {
+                                win.rt.PushAxisAlignedClip(
+                                    &clip,
+                                    windows::Win32::Graphics::Direct2D::D2D1_ANTIALIAS_MODE_ALIASED,
+                                );
+                            }
+                            for (id, png, dest) in &drawable {
+                                win.draw_image(*id, png, *dest);
+                            }
+                            unsafe {
+                                win.rt.PopAxisAlignedClip();
+                            }
+                        }
                         // iTerm2-style dimming of unfocused splits. (Browser
                         // panes are live HWNDs above us — can't be veiled.)
                         if multi && !active && dim > 0.0 {
@@ -2855,6 +2872,42 @@ fn loword(v: u32) -> u16 {
 
 fn hiword(v: u32) -> u16 {
     ((v >> 16) & 0xffff) as u16
+}
+
+/// Which of a pane's inline images intersect the viewport, and where.
+fn visible_images(
+    t: &TermPane,
+    term: &alacritty_terminal::Term<crate::term_pane::EventProxy>,
+    content: RectF,
+    fonts: &FontSet,
+) -> Vec<(u64, std::sync::Arc<Vec<u8>>, windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F)> {
+    use std::sync::atomic::Ordering;
+    let images = t.shared.images.lock().unwrap();
+    if images.is_empty() || term.mode().contains(TermMode::ALT_SCREEN) {
+        return Vec::new();
+    }
+    let lines_now = t.shared.lines_seen.load(Ordering::Relaxed) as i64;
+    let d = term.grid().display_offset() as i64;
+    let cursor_row = term.grid().cursor.point.line.0 as i64;
+    let screen = term.grid().screen_lines() as i64;
+    let mut out = Vec::new();
+    for img in images.iter() {
+        let delta = lines_now - img.anchor as i64;
+        // Viewport row of the image's top edge.
+        let row = cursor_row + d - delta;
+        if row + img.rows as i64 <= 0 || row >= screen {
+            continue;
+        }
+        let box_w = (content.w - 2.0 * PANE_PAD).max(8.0);
+        let box_h = img.rows as f32 * fonts.cell_h;
+        let scale = (box_w / img.width as f32).min(box_h / img.height as f32).min(1.0);
+        let w = img.width as f32 * scale;
+        let h = img.height as f32 * scale;
+        let x = content.x + PANE_PAD;
+        let y = content.y + PANE_PAD + row as f32 * fonts.cell_h;
+        out.push((img.id, img.png.clone(), rf(x, y, x + w, y + h)));
+    }
+    out
 }
 
 /// Escape regex metacharacters so selection prefill searches literally.

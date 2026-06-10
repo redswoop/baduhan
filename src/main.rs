@@ -11,6 +11,7 @@ mod config;
 mod ctl;
 mod dragdrop;
 mod hints;
+mod images;
 mod keys;
 mod palette;
 mod pane_tree;

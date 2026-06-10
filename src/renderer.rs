@@ -161,6 +161,9 @@ pub struct WindowGfx {
     pub rt: ID2D1RenderTarget,
     hwnd_rt: Option<ID2D1HwndRenderTarget>,
     pub brush: ID2D1SolidColorBrush,
+    /// Decoded inline-image bitmaps, keyed by image id. None = decode failed
+    /// (don't retry every frame). Lives with the render target.
+    img_cache: std::cell::RefCell<std::collections::HashMap<u64, Option<ID2D1Bitmap>>>,
 }
 
 impl WindowGfx {
@@ -177,7 +180,12 @@ impl WindowGfx {
             rt.SetDpi(dpi, dpi);
             rt.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
             let brush = rt.CreateSolidColorBrush(&palette::d2d(palette::DEFAULT_FG), None)?;
-            Ok(WindowGfx { rt, hwnd_rt: Some(hwnd_rt), brush })
+            Ok(WindowGfx {
+                rt,
+                hwnd_rt: Some(hwnd_rt),
+                brush,
+                img_cache: Default::default(),
+            })
         }
     }
 
@@ -208,7 +216,10 @@ impl WindowGfx {
             rt.SetDpi(dpi, dpi);
             rt.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
             let brush = rt.CreateSolidColorBrush(&palette::d2d(palette::DEFAULT_FG), None)?;
-            Ok((WindowGfx { rt, hwnd_rt: None, brush }, bmp))
+            Ok((
+                WindowGfx { rt, hwnd_rt: None, brush, img_cache: Default::default() },
+                bmp,
+            ))
         }
     }
 
@@ -297,6 +308,45 @@ impl WindowGfx {
                 );
             }
         }
+    }
+}
+
+impl WindowGfx {
+    /// Draw an inline image (PNG bytes), decoding + caching on first use.
+    pub fn draw_image(&self, id: u64, png: &[u8], dest: D2D_RECT_F) {
+        let mut cache = self.img_cache.borrow_mut();
+        if cache.len() > 64 {
+            cache.clear();
+        }
+        let entry = cache.entry(id).or_insert_with(|| decode_to_bitmap(&self.rt, png));
+        if let Some(bmp) = entry.as_ref() {
+            unsafe {
+                self.rt.DrawBitmap(
+                    bmp,
+                    Some(&dest),
+                    1.0,
+                    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                    None,
+                );
+            }
+        }
+    }
+}
+
+fn decode_to_bitmap(rt: &ID2D1RenderTarget, png: &[u8]) -> Option<ID2D1Bitmap> {
+    use windows::Win32::Graphics::Imaging::*;
+    use windows::Win32::System::Com::*;
+    use windows::Win32::UI::Shell::SHCreateMemStream;
+    unsafe {
+        let wic: IWICImagingFactory =
+            CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).ok()?;
+        let stream = SHCreateMemStream(Some(png))?;
+        let decoder = wic
+            .CreateDecoderFromStream(&stream, std::ptr::null(), WICDecodeMetadataCacheOnDemand)
+            .ok()?;
+        let frame = decoder.GetFrame(0).ok()?;
+        let converted = WICConvertBitmapSource(&GUID_WICPixelFormat32bppPBGRA, &frame).ok()?;
+        rt.CreateBitmapFromWicBitmap(&converted, None).ok()
     }
 }
 

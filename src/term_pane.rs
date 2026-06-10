@@ -37,6 +37,8 @@ pub struct PaneShared {
     pub lines_seen: std::sync::atomic::AtomicU64,
     /// OSC 133;A prompt-start marks, as `lines_seen` values (newest last).
     pub marks: Mutex<std::collections::VecDeque<u64>>,
+    /// Inline images (OSC 1337), anchored to the line clock.
+    pub images: Mutex<Vec<crate::images::InlineImage>>,
 }
 
 impl PaneShared {
@@ -328,6 +330,7 @@ impl TermPane {
             osc7_cwd: Mutex::new(None),
             lines_seen: std::sync::atomic::AtomicU64::new(0),
             marks: Mutex::new(std::collections::VecDeque::new()),
+            images: Mutex::new(Vec::new()),
         });
 
         let proxy = EventProxy(shared.clone());
@@ -349,6 +352,7 @@ impl TermPane {
             let proxy_exit = proxy.clone();
             let shared_cwd = shared.clone();
             let mut processor: Processor = Processor::new();
+            let mut img_scan = crate::images::ImgScan::default();
             Pty::spawn(
                 &profile.command,
                 profile.cwd.as_deref(),
@@ -356,6 +360,7 @@ impl TermPane {
                 rows,
                 &ctl_env(pane_id),
                 move |bytes| {
+                    use std::sync::atomic::Ordering;
                     // Shell-integration cwd reports (OSC 7) — alacritty
                     // ignores them, so sniff before parsing.
                     if let Some(url) = scan_osc7(bytes)
@@ -363,9 +368,43 @@ impl TermPane {
                     {
                         *shared_cwd.osc7_cwd.lock().unwrap() = Some(path);
                     }
-                    scan_lines_and_marks(bytes, &shared_cwd);
+                    let segs = img_scan.feed(bytes);
                     let mut term = term.lock();
-                    processor.advance(&mut *term, bytes);
+                    for seg in segs {
+                        match seg {
+                            crate::images::Seg::Plain(b) => {
+                                scan_lines_and_marks(&b, &shared_cwd);
+                                processor.advance(&mut *term, &b);
+                            },
+                            crate::images::Seg::Image(img) => {
+                                // Reserve grid rows so the prompt continues
+                                // below the picture.
+                                let (cell_h, screen_rows) = {
+                                    let s = shared_cwd.size.lock().unwrap();
+                                    (s.cell_height.max(8) as u32, s.num_lines)
+                                };
+                                let rows = (img.height.div_ceil(cell_h) as u16)
+                                    .clamp(1, screen_rows.saturating_sub(2).max(1));
+                                let anchor = shared_cwd.lines_seen.load(Ordering::Relaxed);
+                                {
+                                    let mut imgs = shared_cwd.images.lock().unwrap();
+                                    imgs.push(crate::images::InlineImage {
+                                        id: crate::app::next_id(),
+                                        anchor,
+                                        png: std::sync::Arc::new(img.png),
+                                        width: img.width,
+                                        height: img.height,
+                                        rows,
+                                    });
+                                    let excess = imgs.len().saturating_sub(16);
+                                    imgs.drain(..excess);
+                                }
+                                let nl = "\r\n".repeat(rows as usize);
+                                scan_lines_and_marks(nl.as_bytes(), &shared_cwd);
+                                processor.advance(&mut *term, nl.as_bytes());
+                            },
+                        }
+                    }
                     drop(term);
                     proxy_out.send_event(Event::Wakeup);
                 },
