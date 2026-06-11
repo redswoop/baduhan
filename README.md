@@ -6,6 +6,8 @@ browser panes for web development. Single ~1 MB exe, no runtime.
 
 ![CI](https://github.com/redswoop/baduhan/actions/workflows/ci.yml/badge.svg)
 
+![baduhan — tabs, splits, truecolor, styled underlines, emoji, hyperlinks](assets/hero.png)
+
 ## Why
 
 Windows Terminal is fine. iTerm2 is better. baduhan chases the parts of iTerm2
@@ -73,6 +75,8 @@ baduhan fontsize 14
 them — an on-screen toast announces each pick ("🎨 Dracula (6/15)"), applied
 instantly to every window and persisted. Every theme is also in the command
 palette by name ("Theme: Nord").
+
+![Command palette filtering themes](assets/palette.png)
 
 ## Hotkeys
 
@@ -181,6 +185,8 @@ precmd() { printf '\e]7;file://%s%s\e\\\e]133;A\e\\' "$HOST" "$PWD" }          #
 The browser pane is built to sit next to your dev server — and to be driven
 from the shell and from test tooling.
 
+![Browser pane next to a WSL shell, driven by `baduhan browse`](assets/browser.png)
+
 **From any shell pane** (the env vars flow into WSL too, via WSLENV):
 
 ```bash
@@ -220,6 +226,8 @@ picture inline, scrolling with the scrollback. iTerm2's own `imgcat`
 script works unmodified — both the single-sequence `File=` form and the
 modern multipart `MultipartFile=`/`FilePart=`/`FileEnd` protocol are
 implemented. `baduhan view` also reads stdin: `curl -s …/cat.png | baduhan view`.
+
+![Inline image rendered in the scrollback](assets/imgcat.png)
 
 ## Session restore
 
