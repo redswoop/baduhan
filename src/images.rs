@@ -12,7 +12,6 @@ use std::sync::Arc;
 /// giant sequence) or imgcat's default multipart form (`MultipartFile=` →
 /// `FilePart=`× → `FileEnd`).
 pub const PREFIX: &[u8] = b"\x1b]1337;";
-pub const MARKER: &[u8] = b"\x1b]1337;File=";
 
 pub struct InlineImage {
     pub id: u64,
@@ -250,6 +249,8 @@ pub fn b64_decode(data: &[u8]) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const MARKER: &[u8] = b"\x1b]1337;File=";
 
     /// Tiny valid PNG header (1×1 IHDR; body truncated — fine for dims).
     fn tiny_png() -> Vec<u8> {
