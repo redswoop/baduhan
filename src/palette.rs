@@ -1,6 +1,6 @@
 //! Color scheme and ANSI palette resolution.
 
-use std::sync::OnceLock;
+use std::sync::RwLock;
 
 use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
@@ -10,8 +10,8 @@ pub const fn rgb(r: u8, g: u8, b: u8) -> Rgb {
     Rgb { r, g, b }
 }
 
-/// The active color scheme. Set once at startup (before any panes spawn);
-/// read from the UI thread and from PTY reader threads (OSC color queries).
+/// The active color scheme. Set at startup and on config hot-reload; read
+/// from the UI thread and from PTY reader threads (OSC color queries).
 #[derive(Clone, Copy)]
 pub struct Scheme {
     pub ansi: [Rgb; 16],
@@ -26,14 +26,14 @@ impl Scheme {
     }
 }
 
-static SCHEME: OnceLock<Scheme> = OnceLock::new();
+static SCHEME: RwLock<Option<Scheme>> = RwLock::new(None);
 
 pub fn set_scheme(s: Scheme) {
-    let _ = SCHEME.set(s);
+    *SCHEME.write().unwrap() = Some(s);
 }
 
 pub fn scheme() -> Scheme {
-    SCHEME.get().copied().unwrap_or_else(Scheme::campbell)
+    SCHEME.read().unwrap().unwrap_or_else(Scheme::campbell)
 }
 
 // Campbell (Windows Terminal default scheme), tweaked background.

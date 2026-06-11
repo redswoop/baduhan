@@ -899,6 +899,57 @@ impl TermWindow {
         self.switch_tab(state.active.min(self.tabs.len() - 1));
     }
 
+    /// Re-apply a freshly reloaded config: fonts, scheme, dim. Per-tab zoom
+    /// sizes are preserved; families/metrics rebuild.
+    pub fn apply_config(&mut self) {
+        let cfg = app::config();
+        if let Ok(f) = FontSet::new(&app::gfx(), &cfg.font_family, cfg.font_size, self.dpi) {
+            self.fonts = f;
+        }
+        for tab in &mut self.tabs {
+            if tab.fonts.is_some() {
+                tab.fonts =
+                    FontSet::new(&app::gfx(), &cfg.font_family, tab.font_size, self.dpi).ok();
+            }
+        }
+        self.relayout();
+        self.invalidate();
+        self.update_title();
+    }
+
+    /// Ctrl+, — open a config file in its associated editor (notepad if none).
+    fn open_settings_file(&self, lua: bool) {
+        let path = if lua {
+            crate::config::Config::path().with_file_name("init.lua")
+        } else {
+            crate::config::Config::path()
+        };
+        if lua && !path.exists() {
+            let _ = std::fs::write(&path, "-- baduhan init.lua — see README \"Scripting\"\n");
+        }
+        unsafe {
+            let r = windows::Win32::UI::Shell::ShellExecuteW(
+                None,
+                windows::core::w!("open"),
+                &HSTRING::from(path.to_string_lossy().as_ref()),
+                None,
+                None,
+                SW_SHOWNORMAL,
+            );
+            if r.0 as isize <= 32 {
+                // No association for .json/.lua: fall back to notepad.
+                let _ = windows::Win32::UI::Shell::ShellExecuteW(
+                    None,
+                    windows::core::w!("open"),
+                    windows::core::w!("notepad.exe"),
+                    &HSTRING::from(path.to_string_lossy().as_ref()),
+                    None,
+                    SW_SHOWNORMAL,
+                );
+            }
+        }
+    }
+
     /// Handle a `baduhan browse/reload/devtools` request from a shell pane.
     /// Returns false when the pane isn't ours (caller tries other windows).
     fn handle_ctl(&mut self, req: &crate::ctl::CtlReq) -> bool {
@@ -1705,6 +1756,8 @@ impl TermWindow {
             A::PromptPrev => self.prompt_jump(-1),
             A::PromptNext => self.prompt_jump(1),
             A::Hints => self.open_hints(),
+            A::OpenSettings => self.open_settings_file(false),
+            A::OpenInitLua => self.open_settings_file(true),
         }
     }
 
@@ -2007,6 +2060,12 @@ impl TermWindow {
                 VK_TAB => {
                     let n = self.tabs.len().max(1);
                     self.switch_tab((self.active + 1) % n);
+                    return true;
+                },
+                VK_OEM_COMMA => {
+                    // Ctrl+, opens settings (Windows Terminal muscle memory);
+                    // changes hot-reload on save.
+                    self.open_settings_file(false);
                     return true;
                 },
                 VK_OEM_PLUS => {
@@ -2735,6 +2794,9 @@ impl TermWindow {
                 }
                 crate::dragdrop::register(self.hwnd);
                 app::ensure_quake_hotkey(self.hwnd);
+                unsafe {
+                    SetTimer(Some(self.hwnd), app::CONFIG_TIMER_ID, 1000, None);
+                }
                 match self.pending_init.take() {
                     Some(app::WindowInit::Adopt(tab)) => self.adopt_tab(tab, None),
                     Some(app::WindowInit::Restore(state)) => self.restore_tabs(state),
@@ -2748,6 +2810,10 @@ impl TermWindow {
             },
             WM_HOTKEY => {
                 app::toggle_quake();
+                Some(LRESULT(0))
+            },
+            WM_TIMER if wparam.0 == app::CONFIG_TIMER_ID => {
+                app::poll_config_change();
                 Some(LRESULT(0))
             },
             WM_APP_DROP_FILES => {

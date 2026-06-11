@@ -25,9 +25,45 @@ thread_local! {
     static HOTKEY_HOST: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
     /// The quake dropdown window, if one has been created (0 = none).
     static QUAKE: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
+    /// (settings.json, init.lua) mtimes at last config load.
+    static CONFIG_MTIMES: std::cell::Cell<(u64, u64)> = const { std::cell::Cell::new((0, 0)) };
 }
 
 const QUAKE_HOTKEY_ID: i32 = 0xBA1;
+/// SetTimer id for the once-a-second config mtime poll.
+pub const CONFIG_TIMER_ID: usize = 0xBA2;
+
+fn config_mtimes() -> (u64, u64) {
+    let mt = |p: &std::path::Path| {
+        std::fs::metadata(p)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    };
+    let settings = Config::path();
+    let lua = settings.with_file_name("init.lua");
+    (mt(&settings), mt(&lua))
+}
+
+/// Timer tick: if settings.json or init.lua changed on disk, reload the
+/// config and apply it to every live window.
+pub fn poll_config_change() {
+    let now = config_mtimes();
+    if CONFIG_MTIMES.with(|c| c.get()) == now {
+        return;
+    }
+    CONFIG_MTIMES.with(|c| c.set(now));
+    let mut cfg = Config::load_or_create();
+    crate::scripting::init(&mut cfg);
+    crate::palette::set_scheme(cfg.scheme());
+    CONFIG.with(|c| *c.borrow_mut() = Some(Rc::new(cfg)));
+    let handles: Vec<isize> = WINDOWS.with(|w| w.borrow().clone());
+    for h in handles {
+        with_window(HWND(h as *mut _), |w| w.apply_config());
+    }
+}
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -51,6 +87,7 @@ pub fn config() -> Rc<Config> {
                 let mut cfg = Config::load_or_create();
                 crate::scripting::init(&mut cfg);
                 crate::palette::set_scheme(cfg.scheme());
+                CONFIG_MTIMES.with(|c| c.set(config_mtimes()));
                 Rc::new(cfg)
             })
             .clone()

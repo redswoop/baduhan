@@ -27,7 +27,10 @@ to your dev server — in a small, fast, native package.
 
 ## Configuration
 
-Settings live at `%APPDATA%\baduhan\settings.json`. On first run baduhan
+Settings live at `%APPDATA%\baduhan\settings.json` — **`Ctrl+,` opens it**
+(also in the command palette), and changes **hot-reload on save**: font,
+size, scheme, dimming, and Lua keybindings apply live, no restart.
+On first run baduhan
 **imports your Windows Terminal settings** — default font (Nerd Fonts work
 out of the box), color scheme, and profiles, including dynamic-source
 profiles like Git Bash (resolved through WT fragment files) and WSL distros

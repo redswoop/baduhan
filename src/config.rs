@@ -562,9 +562,10 @@ pub fn split_commandline(cl: &str) -> Vec<String> {
 }
 
 /// Strip // and /* */ comments plus trailing commas so serde_json can parse
-/// Windows Terminal's JSONC.
+/// Windows Terminal's JSONC. Also tolerates a UTF-8 BOM (Notepad,
+/// PowerShell's Set-Content, and friends love adding one).
 pub fn strip_jsonc(text: &str) -> String {
-    let bytes = text.as_bytes();
+    let bytes = text.trim_start_matches('\u{feff}').as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     let mut in_str = false;
@@ -643,6 +644,13 @@ pub fn strip_jsonc(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strip_jsonc_tolerates_bom() {
+        let src = "\u{feff}{\"a\": 1}";
+        let v: serde_json::Value = serde_json::from_str(&strip_jsonc(src)).unwrap();
+        assert_eq!(v["a"], 1);
+    }
 
     #[test]
     fn strip_jsonc_comments_and_trailing_commas() {
