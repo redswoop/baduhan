@@ -2,4 +2,5 @@
 # Machine-local cargo config (redirects target-dir out of Dropbox)
 /.cargo/
 *.png
+!assets/*.png
 *.tmp.*
