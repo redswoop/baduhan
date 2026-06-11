@@ -5,6 +5,7 @@
 //! font, color schemes — including dynamic-source profiles resolved via WT
 //! fragment files) plus auto-detected shells (WSL distros, Git Bash, cmd).
 
+#[allow(unused_imports)]
 use std::path::{Path, PathBuf};
 
 use alacritty_terminal::vte::ansi::Rgb;
@@ -62,6 +63,9 @@ pub struct Config {
     pub profiles: Vec<Profile>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheme: Option<SchemeConfig>,
+    /// Name of the active theme from the themes dir (cycle position).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme: Option<String>,
 }
 
 fn default_font_family() -> String {
@@ -99,6 +103,7 @@ impl Default for Config {
             default_profile: String::new(),
             profiles: Vec::new(),
             scheme: None,
+            theme: None,
         }
     }
 }
@@ -285,6 +290,40 @@ pub fn parse_wt_scheme(json: &str) -> Option<SchemeConfig> {
         cursor: c("cursorColor"),
         ansi,
     })
+}
+
+/// %APPDATA%\baduhan\themes — drop .json (WT scheme) or .itermcolors files
+/// here; Ctrl+Shift+S cycles through them.
+pub fn themes_dir() -> PathBuf {
+    Config::path().with_file_name("themes")
+}
+
+/// Theme files, sorted by name: (display name, path).
+pub fn list_themes() -> Vec<(String, PathBuf)> {
+    let mut out: Vec<(String, PathBuf)> = std::fs::read_dir(themes_dir())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let p = e.path();
+            let ext = p.extension()?.to_string_lossy().to_lowercase();
+            if ext != "json" && ext != "itermcolors" {
+                return None;
+            }
+            Some((p.file_stem()?.to_string_lossy().into_owned(), p))
+        })
+        .collect();
+    out.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+    out
+}
+
+pub fn load_theme_file(path: &Path) -> Option<SchemeConfig> {
+    let text = std::fs::read_to_string(path).ok()?;
+    if text.trim_start_matches('\u{feff}').trim_start().starts_with('{') {
+        parse_wt_scheme(&text)
+    } else {
+        parse_itermcolors(&text)
+    }
 }
 
 pub fn parse_hex(s: &str) -> Option<Rgb> {

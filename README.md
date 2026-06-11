@@ -68,6 +68,12 @@ baduhan font "JetBrainsMono Nerd Font"
 baduhan fontsize 14
 ```
 
+**Theme cycling**: drop `.json` (WT scheme) or `.itermcolors` files into
+`%APPDATA%\baduhan\themes\` and press **`Ctrl+Shift+S`** to cycle through
+them — an on-screen toast announces each pick ("🎨 Dracula (6/15)"), applied
+instantly to every window and persisted. Every theme is also in the command
+palette by name ("Theme: Nord").
+
 ## Hotkeys
 
 ### Tabs

@@ -41,6 +41,8 @@ const PLUS_W: f32 = 28.0;
 const BTN_W: f32 = 30.0;
 
 const D2DERR_RECREATE_TARGET: i32 = 0x8899000Cu32 as i32;
+/// SetTimer id for clearing the announcement toast.
+const TOAST_TIMER_ID: usize = 0xBA3;
 
 enum Drag {
     None,
@@ -113,6 +115,8 @@ pub struct TermWindow {
     palette: Option<PaletteUi>,
     /// Hovered caption button (HTMINBUTTON/HTMAXBUTTON/HTCLOSE) for hot paint.
     hot_caption: Option<u32>,
+    /// Transient on-screen announcement ("theme: Dracula").
+    toast: Option<String>,
     drag: Drag,
     edit_font: HFONT,
     edit_brush: HBRUSH,
@@ -143,6 +147,7 @@ impl TermWindow {
             hints: None,
             palette: None,
             hot_caption: None,
+            toast: None,
             drag: Drag::None,
             edit_font,
             edit_brush,
@@ -666,6 +671,7 @@ impl TermWindow {
             self.draw_search_bar(win, &gfx);
             self.draw_hints(win, &gfx);
             self.draw_palette(win, &gfx);
+            self.draw_toast(win, &gfx);
         }
     }
 
@@ -897,6 +903,60 @@ impl TermWindow {
             return;
         }
         self.switch_tab(state.active.min(self.tabs.len() - 1));
+    }
+
+    pub fn repaint(&self) {
+        self.invalidate();
+    }
+
+    /// Flash a transient announcement chip (≈1.6 s).
+    fn show_toast(&mut self, text: String) {
+        self.toast = Some(text);
+        unsafe {
+            SetTimer(Some(self.hwnd), TOAST_TIMER_ID, 1600, None);
+        }
+        self.invalidate();
+    }
+
+    /// Cycle to the next theme in %APPDATA%\baduhan\themes (Ctrl+Shift+S).
+    fn cycle_theme(&mut self) {
+        let themes = crate::config::list_themes();
+        if themes.is_empty() {
+            self.show_toast(format!(
+                "no themes in {}",
+                crate::config::themes_dir().display()
+            ));
+            return;
+        }
+        let current = app::config().theme.clone();
+        let idx = current
+            .and_then(|c| themes.iter().position(|(n, _)| *n == c))
+            .map(|i| (i + 1) % themes.len())
+            .unwrap_or(0);
+        let (name, path) = &themes[idx];
+        match crate::config::load_theme_file(path) {
+            Some(scheme) => {
+                app::apply_theme(name, scheme);
+                self.show_toast(format!("\u{1F3A8} {name}  ({}/{})", idx + 1, themes.len()));
+            },
+            None => self.show_toast(format!("couldn't parse theme '{name}'")),
+        }
+    }
+
+    fn draw_toast(&self, win: &WindowGfx, gfx: &crate::renderer::Gfx) {
+        let Some(text) = &self.toast else { return };
+        let (w, _) = self.client_dips();
+        let tw = (text.chars().count() as f32 * 8.0 + 40.0).min(w - 20.0);
+        let bar = rf((w - tw) / 2.0, TABBAR_H + 14.0, (w + tw) / 2.0, TABBAR_H + 48.0);
+        win.rounded(bar, 8.0, palette::d2d_a(palette::CHROME_BG, 0.97));
+        win.frame(bar, palette::d2d_a(palette::ACCENT, 0.9), 1.0);
+        win.text(
+            gfx,
+            text,
+            &self.fonts.ui,
+            rf(bar.left + 16.0, bar.top, bar.right - 8.0, bar.bottom),
+            palette::d2d(palette::TAB_TEXT_ACTIVE),
+        );
     }
 
     /// Re-apply a freshly reloaded config: fonts, scheme, dim. Per-tab zoom
@@ -1668,7 +1728,9 @@ impl TermWindow {
     // ----- command palette ---------------------------------------------------
 
     fn open_palette(&mut self) {
-        let items = crate::command_palette::items(&app::config().profiles);
+        let themes: Vec<String> =
+            crate::config::list_themes().into_iter().map(|(n, _)| n).collect();
+        let items = crate::command_palette::items(&app::config().profiles, &themes);
         let filtered = crate::command_palette::filter(&items, "");
         self.palette = Some(PaletteUi { items, query: String::new(), filtered, selected: 0 });
         self.invalidate();
@@ -1709,7 +1771,7 @@ impl TermWindow {
             },
             VK_RETURN => {
                 let action = self.palette.as_ref().and_then(|p| {
-                    p.filtered.get(p.selected).map(|i| p.items[*i].action)
+                    p.filtered.get(p.selected).map(|i| p.items[*i].action.clone())
                 });
                 self.palette = None;
                 self.invalidate();
@@ -1758,6 +1820,20 @@ impl TermWindow {
             A::Hints => self.open_hints(),
             A::OpenSettings => self.open_settings_file(false),
             A::OpenInitLua => self.open_settings_file(true),
+            A::ThemeNext => self.cycle_theme(),
+            A::Theme(name) => {
+                let theme = crate::config::list_themes()
+                    .into_iter()
+                    .find(|(n, _)| *n == name)
+                    .and_then(|(n, p)| crate::config::load_theme_file(&p).map(|s| (n, s)));
+                match theme {
+                    Some((n, scheme)) => {
+                        app::apply_theme(&n, scheme);
+                        self.show_toast(format!("\u{1F3A8} {n}"));
+                    },
+                    None => self.show_toast(format!("couldn't load theme '{name}'")),
+                }
+            },
         }
     }
 
@@ -2031,6 +2107,7 @@ impl TermWindow {
                 b'V' => self.paste(),
                 b'F' => self.toggle_search(),
                 b'P' => self.open_palette(),
+                b'S' => self.cycle_theme(),
                 c @ b'1'..=b'9' => {
                     // New tab with profile N (Windows Terminal muscle memory).
                     self.new_tab_with_profile((c - b'1') as usize);
@@ -2816,6 +2893,15 @@ impl TermWindow {
                 app::poll_config_change();
                 Some(LRESULT(0))
             },
+            WM_TIMER if wparam.0 == TOAST_TIMER_ID => {
+                unsafe {
+                    let _ = KillTimer(Some(self.hwnd), TOAST_TIMER_ID);
+                }
+                if self.toast.take().is_some() {
+                    self.invalidate();
+                }
+                Some(LRESULT(0))
+            },
             WM_APP_DROP_FILES => {
                 let payload = unsafe {
                     Box::from_raw(
@@ -3208,6 +3294,7 @@ impl TermWindow {
                     15 => self.toggle_search(),
                     16 => self.open_palette(),
                     17 => self.open_hints(),
+                    18 => self.cycle_theme(),
                     14 => {
                         // Simulate a file drop on the active pane's center;
                         // lparam: 0 paste, 1 copy, 2 move.

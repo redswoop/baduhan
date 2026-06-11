@@ -47,6 +47,22 @@ fn config_mtimes() -> (u64, u64) {
     (mt(&settings), mt(&lua))
 }
 
+/// Apply a theme immediately (repaint now, persist, no reload round-trip).
+pub fn apply_theme(name: &str, scheme: crate::config::SchemeConfig) {
+    let mut cfg: Config = (*config()).clone();
+    cfg.scheme = Some(scheme);
+    cfg.theme = Some(name.to_string());
+    crate::palette::set_scheme(cfg.scheme());
+    let _ = cfg.save();
+    CONFIG.with(|c| *c.borrow_mut() = Some(Rc::new(cfg)));
+    // Our own write shouldn't re-trigger the hot-reload poll.
+    CONFIG_MTIMES.with(|c| c.set(config_mtimes()));
+    let handles: Vec<isize> = WINDOWS.with(|w| w.borrow().clone());
+    for h in handles {
+        with_window(HWND(h as *mut _), |w| w.repaint());
+    }
+}
+
 /// Timer tick: if settings.json or init.lua changed on disk, reload the
 /// config and apply it to every live window.
 pub fn poll_config_change() {

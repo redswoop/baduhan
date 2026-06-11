@@ -4,8 +4,10 @@
 use crate::config::Profile;
 use crate::pane_tree::Dir;
 
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub enum PaletteAction {
+    Theme(String),
+    ThemeNext,
     NewTabProfile(usize),
     Split(Dir),
     BrowserSplit,
@@ -33,7 +35,7 @@ pub struct Item {
     pub action: PaletteAction,
 }
 
-pub fn items(profiles: &[Profile]) -> Vec<Item> {
+pub fn items(profiles: &[Profile], themes: &[String]) -> Vec<Item> {
     let mut v = Vec::new();
     let it = |label: &str, hint: &'static str, action: PaletteAction| Item {
         label: label.to_string(),
@@ -67,6 +69,14 @@ pub fn items(profiles: &[Profile]) -> Vec<Item> {
     v.push(it("Quick Select (hints)", "Ctrl+Shift+Space", PaletteAction::Hints));
     v.push(it("Settings: Open settings.json", "Ctrl+,", PaletteAction::OpenSettings));
     v.push(it("Settings: Open init.lua (Lua scripting)", "", PaletteAction::OpenInitLua));
+    v.push(it("Theme: Next", "Ctrl+Shift+S", PaletteAction::ThemeNext));
+    for t in themes {
+        v.push(Item {
+            label: format!("Theme: {t}"),
+            hint: "",
+            action: PaletteAction::Theme(t.clone()),
+        });
+    }
     v
 }
 
