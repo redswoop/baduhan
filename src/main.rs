@@ -36,6 +36,15 @@ fn main() {
     }
 
     unsafe {
+        // Debug builds are console-subsystem so logs are visible when run
+        // from a shell. Launched from Explorer, though, Windows creates a
+        // console just for us — detach so no empty console window lingers.
+        // (A shared console — launched from a shell — has >1 process.)
+        let mut pids = [0u32; 2];
+        if windows::Win32::System::Console::GetConsoleProcessList(&mut pids) == 1 {
+            let _ = windows::Win32::System::Console::FreeConsole();
+        }
+
         // OleInitialize (STA + OLE) rather than plain COM init: drag & drop
         // registration requires it.
         let _ = windows::Win32::System::Ole::OleInitialize(None);
