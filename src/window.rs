@@ -9,7 +9,7 @@ use alacritty_terminal::term::TermMode;
 use windows::core::HSTRING;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
-use windows::Win32::UI::HiDpi::GetDpiForWindow;
+use windows::Win32::UI::HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi};
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -111,6 +111,8 @@ pub struct TermWindow {
     search: Option<SearchUi>,
     hints: Option<HintsUi>,
     palette: Option<PaletteUi>,
+    /// Hovered caption button (HTMINBUTTON/HTMAXBUTTON/HTCLOSE) for hot paint.
+    hot_caption: Option<u32>,
     drag: Drag,
     edit_font: HFONT,
     edit_brush: HBRUSH,
@@ -140,6 +142,7 @@ impl TermWindow {
             search: None,
             hints: None,
             palette: None,
+            hot_caption: None,
             drag: Drag::None,
             edit_font,
             edit_brush,
@@ -183,11 +186,43 @@ impl TermWindow {
         RectF { x: 0.0, y: TABBAR_H, w, h: (h - TABBAR_H).max(0.0) }
     }
 
+    // ----- custom frame (tabs in the title bar) ------------------------------
+
+    /// Normal windows get the custom frame; the quake popup keeps its own.
+    fn custom_frame(&self) -> bool {
+        let style = unsafe { GetWindowLongPtrW(self.hwnd, GWL_STYLE) } as u32;
+        style & WS_CAPTION.0 == WS_CAPTION.0
+    }
+
+    /// Resize border thickness in physical px (incl. padded border), per DPI.
+    fn frame_metrics(&self) -> (i32, i32) {
+        unsafe {
+            let dpi = self.dpi as u32;
+            let pad = GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
+            (
+                GetSystemMetricsForDpi(SM_CXSIZEFRAME, dpi) + pad,
+                GetSystemMetricsForDpi(SM_CYSIZEFRAME, dpi) + pad,
+            )
+        }
+    }
+
+    /// Min / max / close caption button rects (DIPs, right-aligned).
+    fn caption_buttons(&self) -> (RectF, RectF, RectF) {
+        let (w, _) = self.client_dips();
+        let bw = 46.0;
+        let h = TABBAR_H - 6.0;
+        let close = RectF { x: w - bw, y: 0.0, w: bw, h };
+        let max = RectF { x: w - 2.0 * bw, y: 0.0, w: bw, h };
+        let min = RectF { x: w - 3.0 * bw, y: 0.0, w: bw, h };
+        (min, max, close)
+    }
+
     // ----- tabs ------------------------------------------------------------
 
     fn tab_width(&self) -> f32 {
         let (w, _) = self.client_dips();
-        let avail = (w - PLUS_W - 16.0).max(50.0);
+        let caption = if self.custom_frame() { 3.0 * 46.0 } else { 0.0 };
+        let avail = (w - PLUS_W - 16.0 - caption).max(50.0);
         (avail / self.tabs.len().max(1) as f32).clamp(TAB_MIN_W, TAB_MAX_W)
     }
 
@@ -946,6 +981,32 @@ impl TermWindow {
             rf(pr.x, pr.y, pr.x + pr.w, pr.y + pr.h),
             palette::d2d(palette::TAB_TEXT),
         );
+
+        // Caption buttons (tabs live in the title bar).
+        if self.custom_frame() {
+            let (minr, maxr, closer) = self.caption_buttons();
+            let zoomed = unsafe { IsZoomed(self.hwnd) }.as_bool();
+            let draw_btn = |r: &RectF, glyph: &str, code: u32, red: bool| {
+                if self.hot_caption == Some(code) {
+                    let bg = if red {
+                        palette::rgb(0xC4, 0x2B, 0x1C)
+                    } else {
+                        palette::TAB_INACTIVE
+                    };
+                    win.fill(rf(r.x, r.y, r.x + r.w, r.y + r.h), palette::d2d(bg));
+                }
+                win.text(
+                    &gfx,
+                    glyph,
+                    &self.fonts.icons,
+                    rf(r.x, r.y, r.x + r.w, r.y + r.h),
+                    palette::d2d(palette::TAB_TEXT_ACTIVE),
+                );
+            };
+            draw_btn(&minr, "\u{E921}", HTMINBUTTON as u32, false);
+            draw_btn(&maxr, if zoomed { "\u{E923}" } else { "\u{E922}" }, HTMAXBUTTON as u32, false);
+            draw_btn(&closer, "\u{E8BB}", HTCLOSE as u32, true);
+        }
     }
 
     fn draw_tab(&self, win: &WindowGfx, gfx: &crate::renderer::Gfx, i: usize, dx: f32) {
@@ -2648,6 +2709,30 @@ impl TermWindow {
     pub fn message(&mut self, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
         match msg {
             WM_CREATE => {
+                if self.custom_frame() {
+                    unsafe {
+                        // Keep the DWM shadow/rounded corners with our frame.
+                        let margins = windows::Win32::UI::Controls::MARGINS {
+                            cxLeftWidth: 0,
+                            cxRightWidth: 0,
+                            cyTopHeight: 1,
+                            cyBottomHeight: 0,
+                        };
+                        let _ = windows::Win32::Graphics::Dwm::DwmExtendFrameIntoClientArea(
+                            self.hwnd, &margins,
+                        );
+                        // Re-run WM_NCCALCSIZE with our handler in place.
+                        let _ = SetWindowPos(
+                            self.hwnd,
+                            None,
+                            0,
+                            0,
+                            0,
+                            0,
+                            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED,
+                        );
+                    }
+                }
                 crate::dragdrop::register(self.hwnd);
                 app::ensure_quake_hotkey(self.hwnd);
                 match self.pending_init.take() {
@@ -2673,6 +2758,138 @@ impl TermWindow {
                 };
                 let (paths, op, pt) = *payload;
                 self.do_drop(paths, op, pt);
+                Some(LRESULT(0))
+            },
+            WM_NCCALCSIZE if wparam.0 != 0 && self.custom_frame() => {
+                // Claim the caption: keep only the resize borders on the
+                // sides/bottom; the client area runs to the top edge.
+                let params = unsafe { &mut *(lparam.0 as *mut NCCALCSIZE_PARAMS) };
+                let (fx, fy) = self.frame_metrics();
+                let rc = &mut params.rgrc[0];
+                rc.left += fx;
+                rc.right -= fx;
+                rc.bottom -= fy;
+                if unsafe { IsZoomed(self.hwnd) }.as_bool() {
+                    rc.top += fy; // maximized windows hang off-screen by fy
+                }
+                Some(LRESULT(0))
+            },
+            WM_NCHITTEST if self.custom_frame() => {
+                let def = unsafe { DefWindowProcW(self.hwnd, msg, wparam, lparam) };
+                if def.0 != HTCLIENT as isize {
+                    return Some(def);
+                }
+                let mut pt = POINT {
+                    x: loword(lparam.0 as u32) as i16 as i32,
+                    y: hiword(lparam.0 as u32) as i16 as i32,
+                };
+                unsafe {
+                    let _ = ScreenToClient(self.hwnd, &mut pt);
+                }
+                let (_, fy) = self.frame_metrics();
+                if pt.y < fy && !unsafe { IsZoomed(self.hwnd) }.as_bool() {
+                    return Some(LRESULT(HTTOP as isize));
+                }
+                let s = self.scale();
+                let (x, y) = (pt.x as f32 / s, pt.y as f32 / s);
+                if y < TABBAR_H {
+                    let (minr, maxr, closer) = self.caption_buttons();
+                    if minr.contains(x, y) {
+                        return Some(LRESULT(HTMINBUTTON as isize));
+                    }
+                    if maxr.contains(x, y) {
+                        return Some(LRESULT(HTMAXBUTTON as isize));
+                    }
+                    if closer.contains(x, y) {
+                        return Some(LRESULT(HTCLOSE as isize));
+                    }
+                    if self.tab_at(x, y).is_some() || self.plus_rect().contains(x, y) {
+                        return Some(LRESULT(HTCLIENT as isize));
+                    }
+                    // Empty tab-bar space drags / double-click-maximizes.
+                    return Some(LRESULT(HTCAPTION as isize));
+                }
+                Some(LRESULT(HTCLIENT as isize))
+            },
+            WM_NCMOUSEMOVE => {
+                let code = wparam.0 as u32;
+                let hot = matches!(code, HTMINBUTTON | HTMAXBUTTON | HTCLOSE).then_some(code);
+                if hot != self.hot_caption {
+                    self.hot_caption = hot;
+                    self.invalidate();
+                }
+                unsafe {
+                    let mut tme = TRACKMOUSEEVENT {
+                        cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                        dwFlags: TME_LEAVE | TME_NONCLIENT,
+                        hwndTrack: self.hwnd,
+                        dwHoverTime: 0,
+                    };
+                    let _ = TrackMouseEvent(&mut tme);
+                }
+                None
+            },
+            WM_NCMOUSELEAVE => {
+                if self.hot_caption.take().is_some() {
+                    self.invalidate();
+                }
+                None
+            },
+            WM_NCLBUTTONDOWN
+                if matches!(wparam.0 as u32, HTMINBUTTON | HTMAXBUTTON | HTCLOSE) =>
+            {
+                // Swallow so DefWindowProc doesn't paint legacy buttons;
+                // the action happens on button-up, like the real caption.
+                Some(LRESULT(0))
+            },
+            WM_NCLBUTTONUP
+                if matches!(wparam.0 as u32, HTMINBUTTON | HTMAXBUTTON | HTCLOSE) =>
+            {
+                let cmd = match wparam.0 as u32 {
+                    HTMINBUTTON => SC_MINIMIZE,
+                    HTMAXBUTTON => {
+                        if unsafe { IsZoomed(self.hwnd) }.as_bool() {
+                            SC_RESTORE
+                        } else {
+                            SC_MAXIMIZE
+                        }
+                    },
+                    _ => SC_CLOSE,
+                };
+                unsafe {
+                    let _ = PostMessageW(
+                        Some(self.hwnd),
+                        WM_SYSCOMMAND,
+                        WPARAM(cmd as usize),
+                        LPARAM(0),
+                    );
+                }
+                Some(LRESULT(0))
+            },
+            WM_NCRBUTTONUP if wparam.0 as u32 == HTCAPTION => {
+                // Standard system menu on right-clicking the "title bar".
+                unsafe {
+                    let menu = GetSystemMenu(self.hwnd, false);
+                    let x = loword(lparam.0 as u32) as i16 as i32;
+                    let y = hiword(lparam.0 as u32) as i16 as i32;
+                    let cmd = TrackPopupMenu(
+                        menu,
+                        TPM_RETURNCMD,
+                        x,
+                        y,
+                        None,
+                        self.hwnd,
+                        None,
+                    );
+                    if cmd.0 != 0 {
+                        let _ = PostMessageW(
+                            Some(self.hwnd),
+                            WM_SYSCOMMAND,
+                            WPARAM(cmd.0 as usize),
+                            LPARAM(0),
+                        );
+                    }
+                }
                 Some(LRESULT(0))
             },
             WM_PAINT => {

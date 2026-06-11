@@ -23,7 +23,7 @@ to your dev server — in a small, fast, native package.
 | VT emulation | `alacritty_terminal` — Alacritty's production emulator: truecolor, 256-color, alt screen, scroll regions, SGR mouse, bracketed paste, OSC titles, synchronized updates (mode 2026), styled/colored underlines, OSC 8 hyperlinks — pinned by a [VT conformance test battery](src/vt_tests.rs) |
 | Rendering | Direct2D + DirectWrite (GPU), per-monitor-v2 DPI native |
 | Browser panes | WebView2 (Edge) child HWNDs; `SetParentWindow` moves them across windows **without reloading** |
-| UI | Custom-drawn tab bar, pane tree, dividers — no framework |
+| UI | Custom-drawn tab bar, pane tree, dividers — no framework. Tabs live **in the title bar** (Windows Terminal-style custom frame): empty tab-bar space drags the window, double-click maximizes, custom min/max/close with Win11 snap-layout support |
 
 ## Configuration
 
