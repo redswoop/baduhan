@@ -36,7 +36,11 @@ pub fn run(args: &[String]) -> ! {
              baduhan reload         reload this tab's browser pane\n  \
              baduhan devtools       open DevTools for this tab's browser pane\n  \
              baduhan cdp            print the Chrome DevTools Protocol endpoint\n  \
-             baduhan view <image>   show an image inline (PNG/JPEG/GIF/BMP)"
+             baduhan view <image>   show an image inline (PNG/JPEG/GIF/BMP)\n\n  \
+             settings (apply live to running terminals):\n  \
+             baduhan theme <file>   import a color theme (.itermcolors or WT json)\n  \
+             baduhan font <family>  set the font family\n  \
+             baduhan fontsize <pt>  set the default font size"
         );
         std::process::exit(2);
     };
@@ -65,6 +69,39 @@ pub fn run(args: &[String]) -> ! {
                 },
             }
         },
+        "theme" => {
+            let Some(file) = args.get(1) else { usage() };
+            let exit = match import_theme(file) {
+                Ok(name) => {
+                    println!("theme applied: {name}");
+                    0
+                },
+                Err(e) => {
+                    eprintln!("baduhan theme: {e}");
+                    1
+                },
+            };
+            std::process::exit(exit);
+        },
+        "font" => {
+            let family = args[1..].join(" ");
+            if family.is_empty() {
+                usage()
+            }
+            let mut cfg = crate::config::Config::load_or_create();
+            cfg.font_family = family.clone();
+            let _ = cfg.save();
+            println!("font: {family}");
+            std::process::exit(0);
+        },
+        "fontsize" => {
+            let Some(size) = args.get(1).and_then(|s| s.parse::<f32>().ok()) else { usage() };
+            let mut cfg = crate::config::Config::load_or_create();
+            cfg.font_size = size.clamp(7.0, 32.0);
+            let _ = cfg.save();
+            println!("font size: {}", cfg.font_size);
+            std::process::exit(0);
+        },
         "cdp" => {
             // No window round-trip needed; the port lives in the config.
             let port = crate::config::Config::load_or_create().browser_debug_port;
@@ -91,6 +128,29 @@ pub fn run(args: &[String]) -> ! {
     }
     eprintln!("baduhan {verb}: no running baduhan window owns pane {pane}");
     std::process::exit(1);
+}
+
+/// Import a color theme into settings.json. Accepts iTerm2 .itermcolors
+/// (XML plist) and Windows Terminal scheme json — the two formats every
+/// theme collection ships.
+fn import_theme(file: &str) -> anyhow::Result<String> {
+    let text = std::fs::read_to_string(file)?;
+    let scheme = if text.trim_start().starts_with('{') {
+        crate::config::parse_wt_scheme(&text)
+    } else {
+        crate::config::parse_itermcolors(&text)
+    };
+    let Some(scheme) = scheme else {
+        anyhow::bail!("not a recognizable .itermcolors or Windows Terminal scheme: {file}");
+    };
+    let mut cfg = crate::config::Config::load_or_create();
+    cfg.scheme = Some(scheme);
+    cfg.save()?;
+    let name = std::path::Path::new(file)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| file.to_string());
+    Ok(name)
 }
 
 /// Emit an image as an iTerm2 inline-image escape on stdout — exactly what

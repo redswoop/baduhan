@@ -185,6 +185,108 @@ impl Config {
     }
 }
 
+impl Config {
+    /// Persist the current config (pretty JSON, no BOM).
+    pub fn save(&self) -> std::io::Result<()> {
+        let path = Self::path();
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let json = serde_json::to_string_pretty(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        std::fs::write(path, json)
+    }
+}
+
+pub fn hex(c: Rgb) -> String {
+    format!("#{:02X}{:02X}{:02X}", c.r, c.g, c.b)
+}
+
+/// Parse an iTerm2 .itermcolors file (XML plist): Ansi 0..15, Foreground,
+/// Background, Cursor — each a dict of Red/Green/Blue Component reals.
+pub fn parse_itermcolors(xml: &str) -> Option<SchemeConfig> {
+    fn component(dict: &str, name: &str) -> Option<f32> {
+        let key = format!("<key>{name} Component</key>");
+        let at = dict.find(&key)? + key.len();
+        let rest = &dict[at..];
+        let start = rest.find("<real>")? + 6;
+        let end = rest[start..].find("</real>")? + start;
+        rest[start..end].trim().parse().ok()
+    }
+    fn to_hex(dict: &str) -> Option<String> {
+        let f = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+        let (r, g, b) = (
+            component(dict, "Red")?,
+            component(dict, "Green")?,
+            component(dict, "Blue")?,
+        );
+        Some(hex(Rgb { r: f(r), g: f(g), b: f(b) }))
+    }
+
+    let mut ansi: Vec<Option<String>> = vec![None; 16];
+    let mut fg = None;
+    let mut bg = None;
+    let mut cursor = None;
+    let mut i = 0;
+    while let Some(k) = xml[i..].find("<key>") {
+        let kstart = i + k + 5;
+        let Some(kend) = xml[kstart..].find("</key>") else { break };
+        let name = xml[kstart..kstart + kend].trim().to_string();
+        let after = kstart + kend + 6;
+        if name.ends_with("Color") {
+            let Some(dend) = xml[after..].find("</dict>") else { break };
+            let dict = &xml[after..after + dend];
+            let value = to_hex(dict);
+            if let Some(v) = value {
+                if let Some(n) = name.strip_prefix("Ansi ").and_then(|s| {
+                    s.strip_suffix(" Color").and_then(|n| n.parse::<usize>().ok())
+                }) {
+                    if n < 16 {
+                        ansi[n] = Some(v);
+                    }
+                } else {
+                    match name.as_str() {
+                        "Foreground Color" => fg = Some(v),
+                        "Background Color" => bg = Some(v),
+                        "Cursor Color" => cursor = Some(v),
+                        _ => {},
+                    }
+                }
+            }
+            i = after + dend + 7;
+        } else {
+            i = after;
+        }
+    }
+    let ansi: Vec<String> = ansi.into_iter().flatten().collect();
+    if ansi.len() != 16 {
+        return None;
+    }
+    Some(SchemeConfig { foreground: fg?, background: bg?, cursor, ansi })
+}
+
+/// Parse a Windows Terminal-style scheme json fragment
+/// ({"name", "black", ..., "foreground", "background", "cursorColor"}).
+pub fn parse_wt_scheme(json: &str) -> Option<SchemeConfig> {
+    let v: serde_json::Value = serde_json::from_str(&strip_jsonc(json)).ok()?;
+    let c = |key: &str| v.get(key).and_then(|x| x.as_str()).map(String::from);
+    let ansi_keys = [
+        "black", "red", "green", "yellow", "blue", "purple", "cyan", "white",
+        "brightBlack", "brightRed", "brightGreen", "brightYellow", "brightBlue",
+        "brightPurple", "brightCyan", "brightWhite",
+    ];
+    let ansi: Vec<String> = ansi_keys.iter().filter_map(|k| c(k)).collect();
+    if ansi.len() != 16 {
+        return None;
+    }
+    Some(SchemeConfig {
+        foreground: c("foreground")?,
+        background: c("background")?,
+        cursor: c("cursorColor"),
+        ansi,
+    })
+}
+
 pub fn parse_hex(s: &str) -> Option<Rgb> {
     let s = s.trim().trim_start_matches('#');
     if s.len() != 6 {
@@ -192,10 +294,6 @@ pub fn parse_hex(s: &str) -> Option<Rgb> {
     }
     let v = u32::from_str_radix(s, 16).ok()?;
     Some(Rgb { r: (v >> 16) as u8, g: (v >> 8) as u8, b: v as u8 })
-}
-
-fn hex(c: Rgb) -> String {
-    format!("#{:02X}{:02X}{:02X}", c.r, c.g, c.b)
 }
 
 // ----- shell detection -------------------------------------------------------
@@ -695,6 +793,59 @@ mod tests {
         assert_eq!(expand_env("a %BADUHAN_TEST_VAR% b"), "a xyz b");
         assert_eq!(expand_env("%NOPE_NOT_SET_123%"), "%NOPE_NOT_SET_123%");
         assert_eq!(expand_env("50%"), "50%");
+    }
+
+    #[test]
+    fn itermcolors_parsing() {
+        // Minimal two-entry sample in real .itermcolors shape; pad the rest.
+        let mut xml = String::from("<plist><dict>");
+        for i in 0..16 {
+            xml.push_str(&format!(
+                "<key>Ansi {i} Color</key><dict>\
+                 <key>Alpha Component</key><real>1</real>\
+                 <key>Blue Component</key><real>{}</real>\
+                 <key>Color Space</key><string>sRGB</string>\
+                 <key>Green Component</key><real>0.5</real>\
+                 <key>Red Component</key><real>0</real></dict>",
+                i as f32 / 15.0
+            ));
+        }
+        xml.push_str(
+            "<key>Foreground Color</key><dict>\
+             <key>Red Component</key><real>1</real>\
+             <key>Green Component</key><real>1</real>\
+             <key>Blue Component</key><real>1</real></dict>\
+             <key>Background Color</key><dict>\
+             <key>Red Component</key><real>0.05</real>\
+             <key>Green Component</key><real>0.05</real>\
+             <key>Blue Component</key><real>0.1</real></dict></dict></plist>",
+        );
+        let s = parse_itermcolors(&xml).expect("parse");
+        assert_eq!(s.foreground, "#FFFFFF");
+        assert_eq!(s.background, "#0D0D1A");
+        assert_eq!(s.ansi.len(), 16);
+        assert_eq!(s.ansi[0], "#008000"); // r=0 g=.5 b=0
+        assert_eq!(s.ansi[15], "#0080FF"); // b=1.0
+        assert!(parse_itermcolors("<plist></plist>").is_none());
+    }
+
+    #[test]
+    fn wt_scheme_parsing() {
+        let json = r##"{
+            "name": "Test", "foreground": "#AAAAAA", "background": "#111111",
+            "cursorColor": "#FF0000",
+            "black": "#000000", "red": "#cc0000", "green": "#00cc00",
+            "yellow": "#cccc00", "blue": "#0000cc", "purple": "#cc00cc",
+            "cyan": "#00cccc", "white": "#cccccc", "brightBlack": "#666666",
+            "brightRed": "#ff0000", "brightGreen": "#00ff00",
+            "brightYellow": "#ffff00", "brightBlue": "#0000ff",
+            "brightPurple": "#ff00ff", "brightCyan": "#00ffff",
+            "brightWhite": "#ffffff"
+        }"##;
+        let s = parse_wt_scheme(json).expect("parse");
+        assert_eq!(s.background, "#111111");
+        assert_eq!(s.cursor.as_deref(), Some("#FF0000"));
+        assert!(parse_wt_scheme("{}").is_none());
     }
 
     #[test]
