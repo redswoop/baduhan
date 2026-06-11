@@ -58,6 +58,16 @@ Unknown font families fall back to Cascadia Mono → Consolas (with a stderr
 note) instead of letting DirectWrite silently substitute something
 proportional.
 
+**Change settings from the shell** — applied live to every open window:
+
+```bash
+baduhan theme Dracula.itermcolors    # import an iTerm2 theme (or WT json) —
+                                     # grab any of ~400 from
+                                     # github.com/mbadolato/iTerm2-Color-Schemes
+baduhan font "JetBrainsMono Nerd Font"
+baduhan fontsize 14
+```
+
 ## Hotkeys
 
 ### Tabs
