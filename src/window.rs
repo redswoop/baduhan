@@ -1114,9 +1114,9 @@ impl TermWindow {
                     palette::d2d(palette::TAB_TEXT_ACTIVE),
                 );
             };
-            draw_btn(&minr, "\u{E921}", HTMINBUTTON as u32, false);
-            draw_btn(&maxr, if zoomed { "\u{E923}" } else { "\u{E922}" }, HTMAXBUTTON as u32, false);
-            draw_btn(&closer, "\u{E8BB}", HTCLOSE as u32, true);
+            draw_btn(&minr, "\u{E921}", HTMINBUTTON, false);
+            draw_btn(&maxr, if zoomed { "\u{E923}" } else { "\u{E922}" }, HTMAXBUTTON, false);
+            draw_btn(&closer, "\u{E8BB}", HTCLOSE, true);
         }
     }
 
@@ -1920,13 +1920,10 @@ impl TermWindow {
 
     /// Jump to the next match in `dir` from the current one.
     fn search_step(&mut self, dir: Direction) {
-        let origin = match self.search.as_ref().and_then(|s| s.found.clone()) {
-            Some(m) => Some(match dir {
+        let origin = self.search.as_ref().and_then(|s| s.found.clone()).map(|m| match dir {
                 Direction::Left => *m.start(),
                 Direction::Right => *m.end(),
-            }),
-            None => None,
-        };
+            });
         self.run_search(origin, dir);
     }
 

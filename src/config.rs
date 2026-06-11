@@ -313,7 +313,7 @@ pub fn list_themes() -> Vec<(String, PathBuf)> {
             Some((p.file_stem()?.to_string_lossy().into_owned(), p))
         })
         .collect();
-    out.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+    out.sort_by_key(|a| a.0.to_lowercase());
     out
 }
 

@@ -51,17 +51,14 @@ pub fn clean(token: &str) -> &str {
 pub fn labels(n: usize) -> Vec<String> {
     const ORDER: &[u8] = b"asdfjkl;ghqwertyuiopzxcvbnm";
     let mut out = Vec::with_capacity(n);
-    for i in 0..n.min(ORDER.len()) {
-        out.push((ORDER[i] as char).to_string());
+    for c in ORDER.iter().take(n) {
+        out.push((*c as char).to_string());
     }
-    let mut i = ORDER.len();
     'outer: for a in ORDER {
         for b in ORDER {
             if out.len() >= n {
                 break 'outer;
             }
-            let _ = i;
-            i += 1;
             out.push(format!("{}{}", *a as char, *b as char));
         }
     }
