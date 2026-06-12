@@ -1,8 +1,8 @@
-[package]
+﻿[package]
 name = "baduhan"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
-description = "A fast, native Windows terminal with iTerm2-style tabs, splits, and embedded browser panes. Baduhan (պատուհան) is Armenian for window."
+description = "A fast, native Windows terminal with iTerm2-style tabs, splits, and embedded browser panes. Baduhan (ÕºÕ¡Õ¿Õ¸Ö‚Õ°Õ¡Õ¶) is Armenian for window."
 license = "MIT"
 repository = "https://github.com/redswoop/baduhan"
 keywords = ["terminal", "windows", "conpty", "emulator"]
