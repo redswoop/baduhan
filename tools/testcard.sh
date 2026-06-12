@@ -2,11 +2,13 @@
 # Terminal rendering test card. Every row puts one glyph per cell between
 # pipes; if a glyph's advance is wrong, the pipes drift off the ruler.
 # Run in any terminal and compare screenshots.
-printf '\n== baduhan term test card ==\n'
 printf 'ruler  |0|1|2|3|4|5|6|7|8|9|\n'
 printf 'ascii  |a|b|c|d|e|f|g|h|i|j|\n'
 printf 'brail  |⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏|\n'
-printf 'nf-bmp ||||||\n'
+# NF BMP-PUA icons (verify bytes with `od -c` after editing — PUA chars
+# don't survive every editor): e0a0 branch, e0b0/e0b2 powerline, f121
+# code, e718 node, f09b github
+printf 'nf-bmp |||||||\n'
 printf 'nf-md  |󰋜|󰌠|󰊢|󰈙|󰉋|\n'
 printf 'box    |┌|┬|┐|├|┼|┤|░|▒|▓|█|\n'
 printf 'ruler2 |--|--|--|--|--|\n'
@@ -19,4 +21,4 @@ for i in 0 1 2 3 4 5 6 7 8 9; do printf '\033[38;2;%d;%d;128m█' $((255 - i * 2
 printf '\033[0m\n'
 printf 'spin   '
 for f in ⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏; do printf '\r\033[7Cspin %s after-text-should-not-move |' "$f"; sleep 0.15; done
-printf '\n== end ==\n'
+printf '\n'

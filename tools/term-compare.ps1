@@ -98,8 +98,12 @@ if ($Target -eq "baduhan") {
     Post-Text $hwnd "bash ~/$script`r"
 } else {
     # Run the script directly: no input injection needed for the card.
-    Start-Process $WtExe -ArgumentList "-d", $env:USERPROFILE, "--size", "100,32", "--", `
-        $bash, "-i", "-l", "-c", "bash ~/$script; exec bash -i -l"
+    # One pre-quoted string: PS5.1 Start-Process drops quoting on array args
+    # with spaces, and wt's CLI splits on bare ';' — use '&&' inside -c.
+    # Sleep instead of respawning a login shell: a second MOTD would scroll
+    # the card off. Capture happens during the sleep; the tab then closes.
+    $wtArgs = "-d `"$env:USERPROFILE`" -- `"$bash`" -i -l -c `"bash ~/$script && sleep 20`""
+    Start-Process $WtExe -ArgumentList $wtArgs
     $deadline = (Get-Date).AddSeconds(15)
     do {
         Start-Sleep -Milliseconds 500
