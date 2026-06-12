@@ -42,7 +42,7 @@ and every registered WSL distro. Delete the file to re-import.
 
 ```jsonc
 {
-  "font_family": "JetBrainsMonoNL Nerd Font",
+  "font_family": "JetBrainsMonoNL Nerd Font",  // typographic or GDI ("… NF") names both work
   "font_size": 13.0,                   // Ctrl+=/− and Ctrl+wheel zoom per tab
   "dim_inactive_panes": 0.22,          // 0.0 disables split dimming
   "scrollback_lines": 10000,           // per pane; alt screen never scrolls

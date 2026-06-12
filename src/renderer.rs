@@ -70,24 +70,54 @@ pub fn family_exists(gfx: &Gfx, family: &str) -> bool {
     }
 }
 
+/// Resolve a configured family against the system fonts. The default
+/// collection indexes weight-stretch-style names ("JetBrainsMonoNL NF");
+/// users naturally configure the typographic name ("JetBrainsMonoNL Nerd
+/// Font" — it's what font pickers show), which only matches under the
+/// typographic family model. Returns the custom collection CreateTextFormat
+/// needs when the name resolved that way (None = default collection).
+fn resolve_family(gfx: &Gfx, family: &str) -> Option<Option<IDWriteFontCollection>> {
+    if family_exists(gfx, family) {
+        return Some(None);
+    }
+    unsafe {
+        let f6: IDWriteFactory6 =
+            windows::core::Interface::cast(&gfx.dwrite).ok()?;
+        let coll = f6
+            .GetSystemFontCollection(false, DWRITE_FONT_FAMILY_MODEL_TYPOGRAPHIC)
+            .ok()?;
+        let mut index = 0u32;
+        let mut exists = windows::core::BOOL(0);
+        coll.FindFamilyName(&HSTRING::from(family), &mut index, &mut exists)
+            .ok()?;
+        if exists.as_bool() {
+            Some(Some(windows::core::Interface::cast(&coll).ok()?))
+        } else {
+            None
+        }
+    }
+}
+
 impl FontSet {
     pub fn new(gfx: &Gfx, family: &str, size: f32, dpi: f32) -> Result<FontSet> {
-        let family = if family_exists(gfx, family) {
-            family.to_string()
-        } else {
-            eprintln!("font family '{family}' not installed; falling back");
-            FALLBACK_FAMILIES
-                .iter()
-                .find(|f| family_exists(gfx, f))
-                .map(|f| f.to_string())
-                .unwrap_or_else(|| "Consolas".to_string())
+        let (family, collection) = match resolve_family(gfx, family) {
+            Some(coll) => (family.to_string(), coll),
+            None => {
+                eprintln!("font family '{family}' not installed; falling back");
+                let fb = FALLBACK_FAMILIES
+                    .iter()
+                    .find(|f| family_exists(gfx, f))
+                    .map(|f| f.to_string())
+                    .unwrap_or_else(|| "Consolas".to_string());
+                (fb, None)
+            },
         };
         let family_h = HSTRING::from(family.as_str());
         unsafe {
             let make = |weight: DWRITE_FONT_WEIGHT, style: DWRITE_FONT_STYLE| -> Result<IDWriteTextFormat> {
                 let f = gfx.dwrite.CreateTextFormat(
                     &family_h,
-                    None,
+                    collection.as_ref(),
                     weight,
                     style,
                     DWRITE_FONT_STRETCH_NORMAL,
