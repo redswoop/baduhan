@@ -1,0 +1,35 @@
+<Configuration>
+  <!-- baduhan visual test rig: pristine guest, software rendering (vGPU
+       off = WARP = deterministic pixels), always-unlocked desktop so
+       SendInput chords and screen capture work regardless of host state.
+       Prepare assets first: tools\sandbox-prepare.ps1, then launch:
+       WindowsSandbox.exe tools\sandbox-test.wsb -->
+  <vGPU>Disable</vGPU>
+  <Networking>Disable</Networking>
+  <MemoryInMB>8192</MemoryInMB>
+  <MappedFolders>
+    <MappedFolder>
+      <HostFolder>C:\Users\anaka\term-compare\sandbox-assets</HostFolder>
+      <SandboxFolder>C:\assets</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+    <MappedFolder>
+      <HostFolder>C:\Users\anaka\term-compare\sandbox-results</HostFolder>
+      <SandboxFolder>C:\results</SandboxFolder>
+      <ReadOnly>false</ReadOnly>
+    </MappedFolder>
+    <MappedFolder>
+      <HostFolder>C:\Program Files\Git</HostFolder>
+      <SandboxFolder>C:\Git</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+    <MappedFolder>
+      <HostFolder>C:\Users\anaka\dropbox\src\baduhan\tools</HostFolder>
+      <SandboxFolder>C:\repo-tools</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+  </MappedFolders>
+  <LogonCommand>
+    <Command>powershell -ExecutionPolicy Bypass -File C:\assets\guest-setup.ps1</Command>
+  </LogonCommand>
+</Configuration>

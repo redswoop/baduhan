@@ -15,10 +15,12 @@ param(
     [Parameter(Mandatory)] [ValidateSet("baduhan", "wt")] [string]$Target,
     [Parameter(Mandatory)] [ValidateSet("card", "keys")] [string]$Scenario,
     [string]$OutDir = "$env:USERPROFILE\term-compare",
-    [string]$BaduhanExe = "$env:USERPROFILE\.cache\cargo-target\term\release\baduhan.exe"
+    [string]$BaduhanExe = "$env:USERPROFILE\.cache\cargo-target\term\release\baduhan.exe",
+    [string]$BashExe = "C:\Program Files\Git\bin\bash.exe",
+    [string]$WtExe = "wt"   # portable WindowsTerminal.exe in the sandbox
 )
 $ErrorActionPreference = "Stop"
-$bash = "C:\Program Files\Git\bin\bash.exe"
+$bash = $BashExe
 
 if (-not ("TC" -as [type])) {
     Add-Type -TypeDefinition @"
@@ -96,7 +98,7 @@ if ($Target -eq "baduhan") {
     Post-Text $hwnd "bash ~/$script`r"
 } else {
     # Run the script directly: no input injection needed for the card.
-    Start-Process wt -ArgumentList "-d", $env:USERPROFILE, "--size", "100,32", "--", `
+    Start-Process $WtExe -ArgumentList "-d", $env:USERPROFILE, "--size", "100,32", "--", `
         $bash, "-i", "-l", "-c", "bash ~/$script; exec bash -i -l"
     $deadline = (Get-Date).AddSeconds(15)
     do {
