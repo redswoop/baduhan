@@ -113,6 +113,8 @@ pub struct TermWindow {
     search: Option<SearchUi>,
     hints: Option<HintsUi>,
     palette: Option<PaletteUi>,
+    /// Keyboard-shortcut overlay (Ctrl+Shift+/); any key dismisses.
+    cheatsheet: bool,
     /// Hovered caption button (HTMINBUTTON/HTMAXBUTTON/HTCLOSE) for hot paint.
     hot_caption: Option<u32>,
     /// Transient on-screen announcement ("theme: Dracula").
@@ -146,6 +148,7 @@ impl TermWindow {
             search: None,
             hints: None,
             palette: None,
+            cheatsheet: false,
             hot_caption: None,
             toast: None,
             drag: Drag::None,
@@ -671,6 +674,7 @@ impl TermWindow {
             self.draw_search_bar(win, &gfx);
             self.draw_hints(win, &gfx);
             self.draw_palette(win, &gfx);
+            self.draw_cheatsheet(win, &gfx);
             self.draw_toast(win, &gfx);
         }
     }
@@ -1451,6 +1455,17 @@ impl TermWindow {
         self.suppress_char = false;
         let mods = Mods::current();
 
+        // Shortcut overlay is modal: any non-modifier key dismisses it.
+        if self.cheatsheet {
+            if !matches!(VIRTUAL_KEY(vk), VK_SHIFT | VK_CONTROL | VK_MENU | VK_LWIN | VK_RWIN)
+            {
+                self.cheatsheet = false;
+                self.suppress_char = true;
+                self.invalidate();
+            }
+            return true;
+        }
+
         if self.hotkey(vk, &mods) {
             return true;
         }
@@ -1818,6 +1833,7 @@ impl TermWindow {
             A::PromptPrev => self.prompt_jump(-1),
             A::PromptNext => self.prompt_jump(1),
             A::Hints => self.open_hints(),
+            A::Cheatsheet => self.cheatsheet = true,
             A::OpenSettings => self.open_settings_file(false),
             A::OpenInitLua => self.open_settings_file(true),
             A::ThemeNext => self.cycle_theme(),
@@ -1878,6 +1894,118 @@ impl TermWindow {
                 palette::d2d_a(palette::TAB_TEXT, 0.7),
             );
         }
+    }
+
+    // ----- keyboard-shortcut overlay -----------------------------------------
+
+    fn toggle_cheatsheet(&mut self) {
+        self.cheatsheet = !self.cheatsheet;
+        // Ctrl+/ produces a control char (0x1F) on US layouts; don't let it
+        // reach the shell.
+        self.suppress_char = true;
+        self.invalidate();
+    }
+
+    fn draw_cheatsheet(&self, win: &WindowGfx, gfx: &crate::renderer::Gfx) {
+        if !self.cheatsheet {
+            return;
+        }
+        let (w, h) = self.client_dips();
+        win.fill(rf(0.0, 0.0, w, h), palette::d2d_a(palette::rgb(0, 0, 0), 0.45));
+
+        const ROW_H: f32 = 24.0;
+        const TITLE_H: f32 = 30.0;
+        const SECTION_GAP: f32 = 10.0;
+        const COL_W: f32 = 352.0;
+        const KEYS_W: f32 = 168.0;
+        const PAD: f32 = 18.0;
+
+        let lua_binds = crate::scripting::list_keybinds();
+        let col_height = |sections: &[&crate::cheatsheet::Section], extra: usize| {
+            sections
+                .iter()
+                .map(|s| TITLE_H + s.entries.len() as f32 * ROW_H + SECTION_GAP)
+                .sum::<f32>()
+                + if extra > 0 {
+                    TITLE_H + extra as f32 * ROW_H + SECTION_GAP
+                } else {
+                    0.0
+                }
+        };
+        let cols = crate::cheatsheet::COLUMNS;
+        // init.lua bindings join the shorter (left) column.
+        let h0 = col_height(cols[0], lua_binds.len());
+        let h1 = col_height(cols[1], 0);
+
+        let pw = (PAD + COL_W + PAD + COL_W + PAD).min(w - 24.0);
+        let ph = h0.max(h1) + 44.0 + 30.0;
+        let x0 = (w - pw) / 2.0;
+        let y0 = (TABBAR_H + (h - TABBAR_H - ph) / 2.0).max(TABBAR_H + 8.0);
+        let bx = rf(x0, y0, x0 + pw, y0 + ph);
+        win.rounded(bx, 8.0, palette::d2d_a(palette::CHROME_BG, 0.98));
+        win.frame(bx, palette::d2d_a(palette::ACCENT, 0.8), 1.0);
+        win.text(
+            gfx,
+            "Keyboard shortcuts",
+            &self.fonts.ui,
+            rf(x0 + PAD, y0 + 10.0, x0 + pw - PAD, y0 + 36.0),
+            palette::d2d(palette::TAB_TEXT_ACTIVE),
+        );
+
+        let draw_section =
+            |title: &str, rows: &mut dyn Iterator<Item = (String, String)>, cx: f32, cy: &mut f32| {
+                win.text(
+                    gfx,
+                    title,
+                    &self.fonts.ui,
+                    rf(cx, *cy + 4.0, cx + COL_W, *cy + TITLE_H),
+                    palette::d2d(palette::ACCENT),
+                );
+                *cy += TITLE_H;
+                for (keys, action) in rows {
+                    win.text(
+                        gfx,
+                        &keys,
+                        &self.fonts.ui,
+                        rf(cx, *cy, cx + KEYS_W, *cy + ROW_H),
+                        palette::d2d(palette::TAB_TEXT_ACTIVE),
+                    );
+                    win.text(
+                        gfx,
+                        &action,
+                        &self.fonts.ui,
+                        rf(cx + KEYS_W + 8.0, *cy, cx + COL_W, *cy + ROW_H),
+                        palette::d2d_a(palette::TAB_TEXT, 0.9),
+                    );
+                    *cy += ROW_H;
+                }
+                *cy += SECTION_GAP;
+            };
+
+        for (ci, col) in cols.iter().enumerate() {
+            let cx = x0 + PAD + ci as f32 * (COL_W + PAD);
+            let mut cy = y0 + 44.0;
+            for s in col.iter() {
+                let mut rows = s
+                    .entries
+                    .iter()
+                    .map(|en| (en.keys.to_string(), en.action.to_string()));
+                draw_section(s.title, &mut rows, cx, &mut cy);
+            }
+            if ci == 0 && !lua_binds.is_empty() {
+                let mut rows =
+                    lua_binds.iter().map(|k| (k.clone(), "init.lua keybinding".to_string()));
+                draw_section("Yours (init.lua)", &mut rows, cx, &mut cy);
+            }
+        }
+
+        win.text(
+            gfx,
+            "press any key to dismiss",
+            &self.fonts.ui,
+            rf(x0 + PAD, y0 + ph - 28.0, x0 + pw - PAD, y0 + ph - 6.0),
+            palette::d2d_a(palette::TAB_TEXT, 0.55),
+        );
     }
 
     // ----- scrollback search -----------------------------------------------
@@ -2120,6 +2248,7 @@ impl TermWindow {
                     VK_UP => self.prompt_jump(-1),
                     VK_DOWN => self.prompt_jump(1),
                     VK_SPACE => self.open_hints(),
+                    VK_OEM_2 => self.toggle_cheatsheet(), // Ctrl+Shift+/ = Ctrl+?
                     _ => return false,
                 },
             }
@@ -2177,6 +2306,21 @@ impl TermWindow {
                 return true;
             }
             return false;
+        }
+
+        // Alt+1..9: go to tab N, 9 = last (iTerm2 muscle memory). Costs the
+        // shell ESC+digit, which Lua keybinds can reclaim per key.
+        if m.alt && !m.ctrl && !m.shift {
+            let c = vk as u8;
+            if (b'1'..=b'9').contains(&c) {
+                let i = (c - b'1') as usize;
+                let i = if c == b'9' { self.tabs.len().saturating_sub(1) } else { i };
+                if i < self.tabs.len() {
+                    self.switch_tab(i);
+                }
+                self.suppress_char = true; // swallow the WM_SYSCHAR
+                return true;
+            }
         }
 
         if m.ctrl && m.alt {
@@ -2349,6 +2493,12 @@ impl TermWindow {
     fn on_lbutton_down(&mut self, x: f32, y: f32) {
         unsafe {
             SetCapture(self.hwnd);
+        }
+
+        if self.cheatsheet {
+            self.cheatsheet = false;
+            self.invalidate();
+            return;
         }
 
         // Tab bar.
@@ -3136,6 +3286,11 @@ impl TermWindow {
             WM_SYSCHAR => {
                 // Alt+char â†’ ESC prefix; swallow to avoid menu bell.
                 let code = wparam.0 as u16;
+                if self.suppress_char {
+                    // Handled as a hotkey in WM_SYSKEYDOWN (Alt+digit).
+                    self.suppress_char = false;
+                    return Some(LRESULT(0));
+                }
                 if code == b' ' as u16 {
                     return None; // Alt+Space = system menu
                 }
@@ -3292,6 +3447,7 @@ impl TermWindow {
                     16 => self.open_palette(),
                     17 => self.open_hints(),
                     18 => self.cycle_theme(),
+                    19 => self.toggle_cheatsheet(),
                     14 => {
                         // Simulate a file drop on the active pane's center;
                         // lparam: 0 paste, 1 copy, 2 move.

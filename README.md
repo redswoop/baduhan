@@ -80,6 +80,12 @@ palette by name ("Theme: Nord").
 
 ## Hotkeys
 
+**`Ctrl+Shift+/`** pops a keyboard-shortcut overlay — every binding below plus
+your init.lua keybinds, dismissed by any key. Also in the command palette
+("Keyboard Shortcuts").
+
+![Keyboard shortcut overlay](assets/cheatsheet.png)
+
 ### Tabs
 | Keys | Action |
 |---|---|
@@ -87,8 +93,8 @@ palette by name ("Theme: Nord").
 | `Ctrl+Shift+1` … `Ctrl+Shift+9` | New tab with profile N |
 | Right-click tab bar | Profile menu |
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous tab |
-| `Ctrl+1` … `Ctrl+8` | Jump to tab N |
-| `Ctrl+9` | Jump to last tab |
+| `Ctrl+1` … `Ctrl+8` / `Alt+1` … `Alt+8` | Jump to tab N |
+| `Ctrl+9` / `Alt+9` | Jump to last tab |
 | `Ctrl+Shift+PgUp` / `PgDn` | Reorder tab left / right |
 | `Ctrl+Shift+M` | Detach tab into a new window |
 | Middle-click tab | Close tab |
@@ -115,6 +121,7 @@ palette by name ("Theme: Nord").
 | Right-click | Copy selection if any, else paste |
 | `Ctrl+Shift+F` | Search scrollback (regex; prefills from selection). `Enter`/`↑` older, `Shift+Enter`/`↓` newer, `Esc` closes |
 | `Ctrl+Shift+P` | **Command palette** — fuzzy-search every action |
+| `Ctrl+Shift+/` | **Keyboard shortcut overlay** — any key dismisses |
 | `Ctrl+Shift+↑` / `↓` | Jump to previous / next shell prompt (needs OSC 133 marks, see below) |
 | `Ctrl+Shift+Space` | **Quick select** — labels every URL/path/hash on screen; type a label to paste it |
 | `Ctrl+click` | Open URL under cursor (OSC 8 hyperlinks or plain text) |
@@ -270,7 +277,9 @@ the WebView2 runtime, which ships with Windows 11 and Edge.
 - `WM_APP+10` wparam=N drives actions programmatically: 1 split-right,
   2 split-down, 3 new-tab, 4 browser-split, 5 next-tab, 6 zoom, 7 close-pane,
   8/9 focus right/left, 10 detach-tab, 11 font+, 12 new-tab-with-profile
-  (lparam = profile index), 13 active-pane-to-new-tab.
+  (lparam = profile index), 13 active-pane-to-new-tab, 14 drop-sim
+  (lparam 0/1/2 = paste/copy/move), 15 search, 16 palette, 17 hints,
+  18 next-theme, 19 shortcut overlay.
 
 ## License
 

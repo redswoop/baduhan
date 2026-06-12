@@ -6,6 +6,7 @@
 
 mod app;
 mod browser_pane;
+mod cheatsheet;
 mod command_palette;
 mod config;
 mod ctl;

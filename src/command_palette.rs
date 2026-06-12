@@ -27,6 +27,7 @@ pub enum PaletteAction {
     Hints,
     OpenSettings,
     OpenInitLua,
+    Cheatsheet,
 }
 
 pub struct Item {
@@ -67,6 +68,7 @@ pub fn items(profiles: &[Profile], themes: &[String]) -> Vec<Item> {
     v.push(it("Jump to Previous Prompt", "Ctrl+Shift+Up", PaletteAction::PromptPrev));
     v.push(it("Jump to Next Prompt", "Ctrl+Shift+Down", PaletteAction::PromptNext));
     v.push(it("Quick Select (hints)", "Ctrl+Shift+Space", PaletteAction::Hints));
+    v.push(it("Keyboard Shortcuts", "Ctrl+Shift+/", PaletteAction::Cheatsheet));
     v.push(it("Settings: Open settings.json", "Ctrl+,", PaletteAction::OpenSettings));
     v.push(it("Settings: Open init.lua (Lua scripting)", "", PaletteAction::OpenInitLua));
     v.push(it("Theme: Next", "Ctrl+Shift+S", PaletteAction::ThemeNext));

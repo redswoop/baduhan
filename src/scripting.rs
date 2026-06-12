@@ -94,8 +94,39 @@ pub fn parse_keyspec(s: &str) -> Option<KeySpec> {
 
 struct Engine {
     lua: Lua,
-    binds: Vec<(KeySpec, RegistryKey)>,
+    binds: Vec<(KeySpec, String, RegistryKey)>,
     title_hook: Option<RegistryKey>,
+}
+
+/// "ctrl+shift+g" → "Ctrl+Shift+G" for the shortcut overlay.
+fn prettify_keyspec(spec: &str) -> String {
+    spec.split('+')
+        .map(str::trim)
+        .map(|p| match p.to_ascii_lowercase().as_str() {
+            "ctrl" | "control" => "Ctrl".to_string(),
+            "shift" => "Shift".to_string(),
+            "alt" => "Alt".to_string(),
+            k if k.len() == 1 => k.to_ascii_uppercase(),
+            k => {
+                let mut c = k.chars();
+                match c.next() {
+                    Some(f) => f.to_ascii_uppercase().to_string() + c.as_str(),
+                    None => String::new(),
+                }
+            },
+        })
+        .collect::<Vec<_>>()
+        .join("+")
+}
+
+/// Pretty chord strings of every init.lua keybind, for the shortcut overlay.
+pub fn list_keybinds() -> Vec<String> {
+    ENGINE.with(|e| {
+        e.borrow()
+            .as_ref()
+            .map(|eng| eng.binds.iter().map(|(_, s, _)| s.clone()).collect())
+            .unwrap_or_default()
+    })
 }
 
 thread_local! {
@@ -191,7 +222,7 @@ pub fn init_from_source(cfg: &mut Config, src: &str) -> mlua::Result<()> {
     let mut binds = Vec::new();
     for (spec, key) in raw_binds.borrow_mut().drain(..) {
         match parse_keyspec(&spec) {
-            Some(k) => binds.push((k, key)),
+            Some(k) => binds.push((k, prettify_keyspec(&spec), key)),
             None => eprintln!("init.lua: bad keybind spec '{spec}'"),
         }
     }
@@ -261,10 +292,10 @@ pub fn handle_key(vk: u16, mods: &Mods) -> Option<Vec<Action>> {
     ENGINE.with(|e| {
         let e = e.borrow();
         let eng = e.as_ref()?;
-        let hit = eng.binds.iter().find(|(k, _)| {
+        let hit = eng.binds.iter().find(|(k, _, _)| {
             k.vk == vk && k.ctrl == mods.ctrl && k.shift == mods.shift && k.alt == mods.alt
         })?;
-        let f: Function = eng.lua.registry_value(&hit.1).ok()?;
+        let f: Function = eng.lua.registry_value(&hit.2).ok()?;
         let queue: Rc<RefCell<Vec<Action>>> = Rc::new(RefCell::new(Vec::new()));
         match make_win(&eng.lua, queue.clone()) {
             Ok(win) => {
