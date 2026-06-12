@@ -535,9 +535,23 @@ struct Run {
     col: usize,
     width: usize,
     text: String,
+    /// Terminal cells started per UTF-16 unit of `text` (wide char = 2 on
+    /// its first unit, surrogate tails and zero-width marks = 0). Lets the
+    /// painter pin each shaped cluster back onto the cell grid.
+    unit_cells: Vec<u8>,
     fg: Rgb,
     underline: Rgb,
     flags: Flags,
+}
+
+impl Run {
+    fn push(&mut self, c: char, cells: u8) {
+        self.text.push(c);
+        self.unit_cells.push(cells);
+        for _ in 1..c.len_utf16() {
+            self.unit_cells.push(0);
+        }
+    }
 }
 
 /// Box-drawing / block-element cell drawn as geometry instead of a glyph
@@ -551,6 +565,68 @@ struct Decor {
 
 fn is_decor(c: char) -> bool {
     ('\u{2500}'..='\u{259F}').contains(&c)
+}
+
+/// Force every shaped cluster's advance to an exact multiple of the cell
+/// width via per-range trailing spacing. The primary font only needs one
+/// uniform correction (its advance is fractional vs. the snapped cell),
+/// but fallback glyphs — nerd-font icons, braille spinners, CJK — arrive
+/// with arbitrary advances and would push the rest of the run off-grid.
+/// `uniform` is the primary-font correction, used as a fallback when
+/// cluster metrics can't be read.
+unsafe fn grid_pin(
+    layout: &IDWriteTextLayout1,
+    utf16: &[u16],
+    unit_cells: &[u8],
+    cw: f32,
+    uniform: f32,
+) {
+    if utf16.is_empty() {
+        return;
+    }
+    let whole =
+        DWRITE_TEXT_RANGE { startPosition: 0, length: utf16.len() as u32 };
+    let mut metrics = vec![DWRITE_CLUSTER_METRICS::default(); utf16.len()];
+    let mut n = 0u32;
+    if unsafe { layout.GetClusterMetrics(Some(&mut metrics), &mut n) }.is_err()
+        || unit_cells.len() != utf16.len()
+    {
+        if uniform.abs() > 0.001 {
+            let _ =
+                unsafe { layout.SetCharacterSpacing(0.0, uniform, 0.0, whole) };
+        }
+        return;
+    }
+    metrics.truncate(n as usize);
+    // Coalesce neighbours needing the same correction into one range —
+    // plain text collapses to a single SetCharacterSpacing call.
+    let mut ranges: Vec<(u32, u32, f32)> = Vec::new();
+    let mut pos = 0usize;
+    for m in &metrics {
+        let len = (m.length as usize).min(unit_cells.len() - pos);
+        let cells: u32 =
+            unit_cells[pos..pos + len].iter().map(|&c| c as u32).sum();
+        let trailing = cells as f32 * cw - m.width;
+        match ranges.last_mut() {
+            Some((_, l, t)) if (*t - trailing).abs() < 0.001 => {
+                *l += len as u32;
+            },
+            _ => ranges.push((pos as u32, len as u32, trailing)),
+        }
+        pos += len;
+    }
+    for (start, len, trailing) in ranges {
+        if trailing.abs() > 0.001 {
+            let _ = unsafe {
+                layout.SetCharacterSpacing(
+                    0.0,
+                    trailing,
+                    0.0,
+                    DWRITE_TEXT_RANGE { startPosition: start, length: len },
+                )
+            };
+        }
+    }
 }
 
 const ALL_UNDERLINES: Flags = Flags::UNDERLINE
@@ -671,20 +747,23 @@ pub fn draw_term(
                 col,
                 width: 0,
                 text: String::new(),
+                unit_cells: Vec::new(),
                 fg,
                 underline,
                 flags: style_flags,
             });
             // Pad for any skipped blank cells within the same logical run start.
-            r.text.push(cell.c);
+            r.push(cell.c, width as u8);
             if let Some(zw) = cell.zerowidth() {
-                r.text.extend(zw);
+                for &z in zw {
+                    r.push(z, 0);
+                }
             }
             r.width += width;
         } else if let Some(r) = &mut cur {
             // Blank cell inside a run: keep monospace alignment with a space.
             if r.row == row && r.col + r.width == col && !r.flags.intersects(ALL_UNDERLINES | Flags::STRIKEOUT) {
-                r.text.push(' ');
+                r.push(' ', 1);
                 r.width += 1;
             } else {
                 runs.push(cur.take().unwrap());
@@ -695,9 +774,12 @@ pub fn draw_term(
         runs.push(r);
     }
 
-    // Per-glyph spacing keeps every column on the snapped pixel grid even
-    // though the font's natural advance is fractional.
-    let spacing = cw - fonts.advance;
+    // Pin every shaped cluster onto the cell grid: glyphs the primary font
+    // doesn't cover at its own advance (nerd-font icons, braille spinners,
+    // fallback CJK…) would otherwise shift everything after them in the
+    // run — visible as the prompt drifting and animated spinners making
+    // text jump.
+    let uniform = cw - fonts.advance;
     unsafe {
         for r in &runs {
             let x = ox + r.col as f32 * cw;
@@ -709,15 +791,10 @@ pub fn draw_term(
                 (r.width as f32 + 2.0) * cw,
                 ch * 2.0,
             ) {
-                if spacing.abs() > 0.001
-                    && let Ok(l1) = windows::core::Interface::cast::<IDWriteTextLayout1>(&layout)
+                if let Ok(l1) =
+                    windows::core::Interface::cast::<IDWriteTextLayout1>(&layout)
                 {
-                    let _ = l1.SetCharacterSpacing(
-                        0.0,
-                        spacing,
-                        0.0,
-                        DWRITE_TEXT_RANGE { startPosition: 0, length: utf16.len() as u32 },
-                    );
+                    grid_pin(&l1, &utf16, &r.unit_cells, cw, uniform);
                 }
                 win.brush.SetColor(&palette::d2d(r.fg));
                 win.rt.DrawTextLayout(
