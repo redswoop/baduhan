@@ -245,8 +245,20 @@ impl TermWindow {
     }
 
     pub fn new_tab(&mut self) {
+        let profile = self.inherited_profile();
+        self.new_tab_with(&profile);
+    }
+
+    /// The profile new tabs and splits clone: the active pane's, falling back
+    /// to the default when the pane is a browser or its profile was removed.
+    fn inherited_profile(&self) -> crate::config::Profile {
         let cfg = app::config();
-        self.new_tab_with(cfg.default_profile());
+        self.tabs
+            .get(self.active)
+            .and_then(|t| t.active_term())
+            .and_then(|t| cfg.profiles.iter().find(|p| p.name == t.profile_name))
+            .unwrap_or_else(|| cfg.default_profile())
+            .clone()
     }
 
     pub fn new_tab_with_profile(&mut self, idx: usize) {
@@ -1280,8 +1292,8 @@ impl TermWindow {
         let kind = if browser {
             PaneKind::Browser(BrowserPane::new(self.hwnd, pane_id, "about:blank", self.edit_font))
         } else {
-            let cfg = app::config();
-            match TermPane::spawn(self.hwnd, pane_id, cfg.default_profile(), 80, 24) {
+            let profile = self.inherited_profile();
+            match TermPane::spawn(self.hwnd, pane_id, &profile, 80, 24) {
                 Ok(t) => PaneKind::Term(t),
                 Err(_) => return,
             }
@@ -1352,6 +1364,21 @@ impl TermWindow {
             self.invalidate();
             self.update_title();
         }
+    }
+
+    /// Alt+[ / Alt+]: cycle focus through the tab's panes in tree order.
+    fn cycle_pane(&mut self, delta: i32) {
+        let Some(tab) = self.tabs.get_mut(self.active) else { return };
+        let leaves = pane_tree::collect_leaves(&tab.root);
+        if leaves.len() < 2 {
+            return;
+        }
+        let cur = leaves.iter().position(|&id| id == tab.active).unwrap_or(0) as i32;
+        let n = leaves.len() as i32;
+        tab.active = leaves[((cur + delta).rem_euclid(n)) as usize];
+        self.focus_active_pane();
+        self.invalidate();
+        self.update_title();
     }
 
     fn zoom_toggle(&mut self) {
@@ -1512,6 +1539,9 @@ impl TermWindow {
             .with_active_term(|t| *t.term.lock().mode())
             .unwrap_or(TermMode::empty());
         if let Some(bytes) = keys::encode_key(vk, &mods, mode) {
+            // The same keystroke may still produce a WM_CHAR (kitty-mode
+            // Ctrl+letter arrives again as a control char) — eat it.
+            self.suppress_char = true;
             self.with_active_term(|t| {
                 {
                     let mut term = t.term.lock();
@@ -1921,10 +1951,16 @@ impl TermWindow {
         const PAD: f32 = 18.0;
 
         let lua_binds = crate::scripting::list_keybinds();
+        // Alt bindings released to the shell via alt_passthrough disappear.
+        let passthrough = app::config().alt_passthrough.clone();
+        let keep = |keys: &str| !crate::cheatsheet::released(keys, &passthrough);
         let col_height = |sections: &[&crate::cheatsheet::Section], extra: usize| {
             sections
                 .iter()
-                .map(|s| TITLE_H + s.entries.len() as f32 * ROW_H + SECTION_GAP)
+                .map(|s| {
+                    let n = s.entries.iter().filter(|en| keep(en.keys)).count();
+                    TITLE_H + n as f32 * ROW_H + SECTION_GAP
+                })
                 .sum::<f32>()
                 + if extra > 0 {
                     TITLE_H + extra as f32 * ROW_H + SECTION_GAP
@@ -1989,6 +2025,7 @@ impl TermWindow {
                 let mut rows = s
                     .entries
                     .iter()
+                    .filter(|en| keep(en.keys))
                     .map(|en| (en.keys.to_string(), en.action.to_string()));
                 draw_section(s.title, &mut rows, cx, &mut cy);
             }
@@ -2308,11 +2345,16 @@ impl TermWindow {
             return false;
         }
 
-        // Alt+1..9: go to tab N, 9 = last (iTerm2 muscle memory). Costs the
-        // shell ESC+digit, which Lua keybinds can reclaim per key.
+        // Alt layer = iTerm2's Cmd: window-manager actions. Each binding costs
+        // the shell that Meta key; "alt_passthrough" in settings.json releases
+        // individual keys back to the shell (Esc-prefix always works too).
+        let released = |key: &str| {
+            app::config().alt_passthrough.iter().any(|k| k.trim().eq_ignore_ascii_case(key))
+        };
         if m.alt && !m.ctrl && !m.shift {
             let c = vk as u8;
-            if (b'1'..=b'9').contains(&c) {
+            if (b'1'..=b'9').contains(&c) && !released(&(c as char).to_string()) {
+                // Go to tab N, 9 = last (iTerm2 muscle memory).
                 let i = (c - b'1') as usize;
                 let i = if c == b'9' { self.tabs.len().saturating_sub(1) } else { i };
                 if i < self.tabs.len() {
@@ -2320,6 +2362,94 @@ impl TermWindow {
                 }
                 self.suppress_char = true; // swallow the WM_SYSCHAR
                 return true;
+            }
+            let handled = match c {
+                b'T' if !released("t") => {
+                    self.new_tab();
+                    true
+                },
+                b'N' if !released("n") => {
+                    app::create_window(None, None);
+                    true
+                },
+                b'W' if !released("w") => {
+                    self.close_active_pane();
+                    true
+                },
+                b'D' if !released("d") => {
+                    self.split(Dir::Row, false);
+                    true
+                },
+                _ => match vkk {
+                    // Directional pane focus (iTerm2 Cmd+Opt+arrows);
+                    // Ctrl+Alt+arrows remain as aliases.
+                    VK_LEFT if !released("left") => {
+                        self.focus_dir(-1, 0);
+                        true
+                    },
+                    VK_RIGHT if !released("right") => {
+                        self.focus_dir(1, 0);
+                        true
+                    },
+                    VK_UP if !released("up") => {
+                        self.focus_dir(0, -1);
+                        true
+                    },
+                    VK_DOWN if !released("down") => {
+                        self.focus_dir(0, 1);
+                        true
+                    },
+                    // Brackets by the character the key types in the active
+                    // layout — raw VK_OEM_* codes shift around on non-US
+                    // layouts (JIS maps them differently).
+                    _ => match keys::base_char(vk).and_then(char::from_u32) {
+                        Some('[') if !released("[") => {
+                            self.cycle_pane(-1);
+                            true
+                        },
+                        Some(']') if !released("]") => {
+                            self.cycle_pane(1);
+                            true
+                        },
+                        _ => false,
+                    },
+                },
+            };
+            if handled {
+                self.suppress_char = true; // swallow the WM_SYSCHAR
+                return true;
+            }
+        }
+        if m.alt && !m.ctrl && m.shift {
+            match vk as u8 {
+                b'T' if !released("shift+t") => {
+                    // New tab, but pick the profile: menu under the + button.
+                    let pr = self.plus_rect();
+                    self.suppress_char = true;
+                    self.show_profile_menu(pr.x, pr.y + pr.h);
+                    return true;
+                },
+                b'D' if !released("shift+d") => {
+                    self.split(Dir::Col, false);
+                    self.suppress_char = true;
+                    return true;
+                },
+                // Alt+{ / Alt+}: previous / next tab (macOS Cmd+Shift+[ / ]).
+                _ => match keys::base_char(vk).and_then(char::from_u32) {
+                    Some('[') if !released("shift+[") => {
+                        let n = self.tabs.len();
+                        self.switch_tab((self.active + n - 1) % n.max(1));
+                        self.suppress_char = true;
+                        return true;
+                    },
+                    Some(']') if !released("shift+]") => {
+                        let n = self.tabs.len().max(1);
+                        self.switch_tab((self.active + 1) % n);
+                        self.suppress_char = true;
+                        return true;
+                    },
+                    _ => {},
+                },
             }
         }
 

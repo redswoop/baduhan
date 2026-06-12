@@ -57,6 +57,11 @@ pub struct Config {
     /// (e.g. "ctrl+`", "win is not supported"; empty disables).
     #[serde(default = "default_quake_hotkey")]
     pub quake_hotkey: String,
+    /// Alt keys to release back to the shell as Meta instead of the built-in
+    /// Alt binding, e.g. ["d", "shift+d", "3"] frees M-d (kill-word) and
+    /// Alt+3. Hot-reloads; the Ctrl+Shift equivalents keep working.
+    #[serde(default)]
+    pub alt_passthrough: Vec<String>,
     #[serde(default)]
     pub default_profile: String,
     #[serde(default)]
@@ -100,6 +105,7 @@ impl Default for Config {
             browser_debug_port: default_cdp_port(),
             restore_session: true,
             quake_hotkey: default_quake_hotkey(),
+            alt_passthrough: Vec::new(),
             default_profile: String::new(),
             profiles: Vec::new(),
             scheme: None,

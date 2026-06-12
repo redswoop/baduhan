@@ -255,31 +255,45 @@ pub fn drag_divider(root: &mut Node, path: &[usize], index: usize, delta_frac: f
         }
 }
 
-/// Find the nearest pane in `dir` from `from`, by rect geometry.
+/// Find the nearest pane in `dir` from `from`, by rect geometry. Panes
+/// straight ahead (overlapping `from` on the perpendicular axis) win over
+/// nearer off-axis ones: in `[1|2]` over a full-width `3`, right from 1 is
+/// 2, even though 3's center is closer.
 pub fn neighbor(lay: &Layout, from: PaneId, dx: i32, dy: i32) -> Option<PaneId> {
     let fr = lay.rect_of(from)?;
     let (fcx, fcy) = fr.center();
-    lay.panes
-        .iter()
-        .filter(|(id, _)| *id != from)
-        .filter(|(_, r)| {
-            let (cx, cy) = r.center();
-            if dx > 0 {
-                cx > fr.x + fr.w - 1.0
-            } else if dx < 0 {
-                cx < fr.x + 1.0
-            } else if dy > 0 {
-                cy > fr.y + fr.h - 1.0
-            } else {
-                cy < fr.y + 1.0
-            }
-        })
-        .min_by(|(_, a), (_, b)| {
-            let da = dist(fcx, fcy, a);
-            let db = dist(fcx, fcy, b);
-            da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
-        })
-        .map(|(id, _)| *id)
+    let ahead = |r: &RectF| {
+        let (cx, cy) = r.center();
+        if dx > 0 {
+            cx > fr.x + fr.w - 1.0
+        } else if dx < 0 {
+            cx < fr.x + 1.0
+        } else if dy > 0 {
+            cy > fr.y + fr.h - 1.0
+        } else {
+            cy < fr.y + 1.0
+        }
+    };
+    let overlaps = |r: &RectF| {
+        if dx != 0 {
+            (r.y + r.h).min(fr.y + fr.h) - r.y.max(fr.y) > 1.0
+        } else {
+            (r.x + r.w).min(fr.x + fr.w) - r.x.max(fr.x) > 1.0
+        }
+    };
+    let nearest = |require_overlap: bool| {
+        lay.panes
+            .iter()
+            .filter(|(id, _)| *id != from)
+            .filter(|(_, r)| ahead(r) && (!require_overlap || overlaps(r)))
+            .min_by(|(_, a), (_, b)| {
+                let da = dist(fcx, fcy, a);
+                let db = dist(fcx, fcy, b);
+                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|(id, _)| *id)
+    };
+    nearest(true).or_else(|| nearest(false))
 }
 
 fn dist(x: f32, y: f32, r: &RectF) -> f32 {
@@ -401,6 +415,22 @@ mod tests {
         assert_eq!(neighbor(&lay, 2, 0, 1), Some(3));
         assert_eq!(neighbor(&lay, 3, -1, 0), Some(1));
         assert_eq!(neighbor(&lay, 1, -1, 0), None);
+    }
+
+    #[test]
+    fn neighbor_prefers_straight_ahead_over_nearer_center() {
+        // [1|2] over a full-width 3: right from 1 must be 2, even though
+        // 3's center is nearer to 1's than 2's is.
+        let mut root = Node::Leaf(1);
+        split(&mut root, 1, Dir::Col, 3);
+        split(&mut root, 1, Dir::Row, 2);
+        let lay = layout(&root, AREA, None);
+        assert_eq!(neighbor(&lay, 1, 1, 0), Some(2));
+        assert_eq!(neighbor(&lay, 2, -1, 0), Some(1));
+        assert_eq!(neighbor(&lay, 1, 0, 1), Some(3));
+        assert_eq!(neighbor(&lay, 2, 0, 1), Some(3));
+        // Up from full-width 3 both 1 and 2 qualify; either is fine.
+        assert!(neighbor(&lay, 3, 0, -1).is_some());
     }
 
     #[test]

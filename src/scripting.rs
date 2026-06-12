@@ -211,6 +211,9 @@ pub fn init_from_source(cfg: &mut Config, src: &str) -> mlua::Result<()> {
     if let Ok(v) = lcfg.get::<String>("default_profile") {
         cfg.default_profile = v;
     }
+    if let Ok(v) = lcfg.get::<Vec<String>>("alt_passthrough") {
+        cfg.alt_passthrough = v;
+    }
     // Lua profiles replace same-named JSON ones, else append.
     for p in raw_profiles.borrow().iter() {
         match cfg.profiles.iter_mut().find(|e| e.name == p.name) {
@@ -331,7 +334,7 @@ pub fn format_title(title: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    const CTRL_SHIFT: Mods = Mods { shift: true, ctrl: true, alt: false };
+    const CTRL_SHIFT: Mods = Mods { shift: true, ctrl: true, alt: false, altgr: false };
 
     #[test]
     fn keyspec_parsing() {
@@ -395,7 +398,13 @@ mod tests {
             ]
         );
         // Non-matching chord falls through to built-ins.
-        assert!(handle_key(b'G' as u16, &Mods { shift: false, ctrl: true, alt: false }).is_none());
+        assert!(
+            handle_key(
+                b'G' as u16,
+                &Mods { shift: false, ctrl: true, alt: false, altgr: false }
+            )
+            .is_none()
+        );
 
         assert_eq!(format_title("bash").as_deref(), Some("* bash"));
     }

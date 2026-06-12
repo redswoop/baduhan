@@ -47,6 +47,7 @@ and every registered WSL distro. Delete the file to re-import.
   "dim_inactive_panes": 0.22,          // 0.0 disables split dimming
   "scrollback_lines": 10000,           // per pane; alt screen never scrolls
   "browser_debug_port": 9333,          // CDP for Playwright etc.; 0 disables
+  "alt_passthrough": ["d", "shift+d"], // release Alt keys back to the shell as Meta
   "default_profile": "Git Bash",
   "profiles": [
     { "name": "Git Bash", "command": ["C:\\Program Files\\Git\\bin\\bash.exe", "-i", "-l"] },
@@ -84,15 +85,23 @@ palette by name ("Theme: Nord").
 your init.lua keybinds, dismissed by any key. Also in the command palette
 ("Keyboard Shortcuts").
 
+The **Alt layer is iTerm2's Cmd**: `Alt+T`/`Alt+N`/`Alt+W`/`Alt+D` and friends
+drive tabs, windows, and panes. Every Alt binding costs the shell that Meta
+key (`Esc`+key always still works); list keys in `alt_passthrough` to hand
+them back to the shell — e.g. `["d", "shift+d"]` restores `M-d` kill-word and
+drops the Alt split bindings (the `Ctrl+Shift` equivalents keep working, and
+the overlay updates to match).
+
 ![Keyboard shortcut overlay](assets/cheatsheet.png)
 
 ### Tabs
 | Keys | Action |
 |---|---|
-| `Ctrl+Shift+T` | New tab (default profile) |
+| `Alt+T` / `Ctrl+Shift+T` | New tab (clones the active pane's profile) |
+| `Alt+Shift+T` | New tab — pick a profile from the menu |
 | `Ctrl+Shift+1` … `Ctrl+Shift+9` | New tab with profile N |
 | Right-click tab bar | Profile menu |
-| `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous tab |
+| `Alt+Shift+]` / `Alt+Shift+[` (also `Ctrl+Tab` / `Ctrl+Shift+Tab`) | Next / previous tab |
 | `Ctrl+1` … `Ctrl+8` / `Alt+1` … `Alt+8` | Jump to tab N |
 | `Ctrl+9` / `Alt+9` | Jump to last tab |
 | `Ctrl+Shift+PgUp` / `PgDn` | Reorder tab left / right |
@@ -103,11 +112,12 @@ your init.lua keybinds, dismissed by any key. Also in the command palette
 ### Panes / splits
 | Keys | Action |
 |---|---|
-| `Ctrl+Shift+D` | Split right (side-by-side) |
-| `Ctrl+Shift+E` | Split down (stacked) |
+| `Alt+D` / `Ctrl+Shift+D` | Split right (side-by-side, clones the pane's profile) |
+| `Alt+Shift+D` / `Ctrl+Shift+E` | Split down (stacked) |
 | `Ctrl+Shift+B` | Split with a **browser pane** |
-| `Ctrl+Shift+W` | Close pane (closes tab when last) |
-| `Ctrl+Alt+←↑↓→` | Focus pane in direction |
+| `Alt+W` / `Ctrl+Shift+W` | Close pane (closes tab when last) |
+| `Alt+[` / `Alt+]` | Previous / next pane |
+| `Alt+←↑↓→` / `Ctrl+Alt+←↑↓→` | Focus pane in direction |
 | `Ctrl+Shift+Enter` | Zoom/restore pane (maximize within tab) |
 | Drag divider | Resize splits |
 | Title bar `✕` | Close that pane (every split has a title bar when a tab has >1 pane) |
@@ -128,6 +138,7 @@ your init.lua keybinds, dismissed by any key. Also in the command palette
 | `Shift+PgUp` / `Shift+PgDn` | Scrollback paging |
 | `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | Font size bigger / smaller / reset |
 | `Ctrl+wheel` | Font zoom |
+| `Shift+Enter` | Newline in Claude Code & co. — apps that enable the [kitty keyboard protocol](https://sw.kovidgoyal.net/kitty/keyboard-protocol/) get full CSI u key disambiguation (`Shift+Enter`, `Ctrl+Enter`, `Ctrl+letters`…); for everything else `Shift+Enter` sends `ESC CR`, no `/terminal-setup` needed |
 
 ### Browser panes
 | Keys | Action |
@@ -223,7 +234,7 @@ at, so you watch your tests drive the page live inside the terminal.
 ### Windows
 | Keys | Action |
 |---|---|
-| `Ctrl+Shift+N` | New window |
+| `Alt+N` / `Ctrl+Shift+N` | New window |
 | `` Ctrl+` `` | **Quake mode** — global hotkey toggles a full-width dropdown terminal (config: `quake_hotkey`) |
 
 ## Inline images

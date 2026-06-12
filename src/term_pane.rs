@@ -336,6 +336,9 @@ impl TermPane {
         let proxy = EventProxy(shared.clone());
         let term_config = Config {
             scrolling_history: crate::app::config().scrollback_lines,
+            // Answer CSI ? u probes so apps (Claude Code, neovim…) enable
+            // CSI u key encoding; keys.rs honors the resulting TermMode.
+            kitty_keyboard: true,
             ..Config::default()
         };
         let term = Arc::new(FairMutex::new(Term::new(

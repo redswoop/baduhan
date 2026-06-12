@@ -33,7 +33,9 @@ impl Vt {
     fn new(cols: usize, rows: usize) -> Vt {
         let events = Arc::new(Mutex::new(Vec::new()));
         let term = Term::new(
-            Config::default(),
+            // Mirror the live pane config (term_pane.rs): kitty keyboard
+            // protocol negotiation on.
+            Config { kitty_keyboard: true, ..Config::default() },
             &TermSize::new(cols, rows),
             Capture(events.clone()),
         );
@@ -423,4 +425,27 @@ fn synchronized_update_buffers_until_end() {
     assert_eq!(vt.row(0), "", "output must be held during sync update");
     vt.feed(b"\x1b[?2026l");
     assert_eq!(vt.row(0), "buffered");
+}
+
+// ----- kitty keyboard protocol (CSI u) -----------------------------------------
+
+#[test]
+fn kitty_keyboard_protocol_push_query_pop() {
+    let mut vt = Vt::new(20, 3);
+    assert!(!vt.term.mode().contains(TermMode::DISAMBIGUATE_ESC_CODES));
+
+    // Apps probe support with CSI ? u and expect a flags report back —
+    // this is how Claude Code decides Shift+Enter works without setup.
+    vt.feed(b"\x1b[?u");
+    assert_eq!(vt.pty_output(), "\x1b[?0u");
+
+    // CSI > 1 u pushes "disambiguate escape codes" onto the mode stack.
+    vt.feed(b"\x1b[>1u");
+    assert!(vt.term.mode().contains(TermMode::DISAMBIGUATE_ESC_CODES));
+    vt.feed(b"\x1b[?u");
+    assert!(vt.pty_output().ends_with("\x1b[?1u"));
+
+    // CSI < u pops back to legacy encoding.
+    vt.feed(b"\x1b[<u");
+    assert!(!vt.term.mode().contains(TermMode::DISAMBIGUATE_ESC_CODES));
 }

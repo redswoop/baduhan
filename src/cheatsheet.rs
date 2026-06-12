@@ -19,12 +19,13 @@ const fn e(keys: &'static str, action: &'static str) -> Entry {
 pub const TABS: Section = Section {
     title: "Tabs",
     entries: &[
-        e("Ctrl+Shift+T", "new tab"),
+        e("Alt+T / Ctrl+Shift+T", "new tab (same profile)"),
+        e("Alt+Shift+T", "new tab, pick profile"),
         e("Ctrl+Shift+1\u{2026}9", "new tab with profile N"),
         e("Alt+1\u{2026}9", "go to tab N (9 = last)"),
         e("Ctrl+1\u{2026}9", "go to tab N (9 = last)"),
-        e("Ctrl+Tab", "next tab"),
-        e("Ctrl+Shift+Tab", "previous tab"),
+        e("Alt+Shift+] / Ctrl+Tab", "next tab"),
+        e("Alt+Shift+[ / Ctrl+Shift+Tab", "previous tab"),
         e("Ctrl+Shift+PgUp/PgDn", "reorder tab"),
         e("Ctrl+Shift+M", "detach tab into new window"),
     ],
@@ -33,11 +34,15 @@ pub const TABS: Section = Section {
 pub const PANES: Section = Section {
     title: "Panes",
     entries: &[
-        e("Ctrl+Shift+D", "split right"),
-        e("Ctrl+Shift+E", "split down"),
+        e("Alt+D / Ctrl+Shift+D", "split right (same profile)"),
+        e("Alt+Shift+D / Ctrl+Shift+E", "split down"),
         e("Ctrl+Shift+B", "split with browser pane"),
-        e("Ctrl+Shift+W", "close pane"),
-        e("Ctrl+Alt+\u{2190}\u{2191}\u{2193}\u{2192}", "focus pane in direction"),
+        e("Alt+W / Ctrl+Shift+W", "close pane"),
+        e("Alt+[ / Alt+]", "previous / next pane"),
+        e(
+            "Alt+\u{2190}\u{2191}\u{2193}\u{2192} / Ctrl+Alt+\u{2190}\u{2191}\u{2193}\u{2192}",
+            "focus pane in direction",
+        ),
         e("Ctrl+Shift+Enter", "zoom pane (toggle)"),
     ],
 };
@@ -53,13 +58,14 @@ pub const TERMINAL: Section = Section {
         e("Ctrl+Click", "open URL under cursor"),
         e("Shift+PgUp/PgDn", "scrollback paging"),
         e("Ctrl+= / - / 0", "font bigger / smaller / reset"),
+        e("Shift+Enter", "newline in Claude Code etc."),
     ],
 };
 
 pub const WINDOW: Section = Section {
     title: "Window & app",
     entries: &[
-        e("Ctrl+Shift+N", "new window"),
+        e("Alt+N / Ctrl+Shift+N", "new window"),
         e("Ctrl+`", "quake mode (global)"),
         e("Ctrl+,", "open settings.json"),
         e("Ctrl+Shift+S", "next theme"),
@@ -71,3 +77,38 @@ pub const WINDOW: Section = Section {
 
 /// Section layout for the overlay: two columns.
 pub const COLUMNS: [&[&Section]; 2] = [&[&TABS, &PANES], &[&TERMINAL, &WINDOW]];
+
+/// True when `chord` is an Alt binding fully released to the shell via the
+/// `alt_passthrough` setting, so the overlay should hide its row. Alias rows
+/// ("Alt+T / Ctrl+Shift+T") stay — the Ctrl+Shift chord still works; pair
+/// rows ("Alt+[ / Alt+]") hide only when both halves are released.
+pub fn released(chord: &str, passthrough: &[String]) -> bool {
+    let k = chord.to_ascii_lowercase();
+    let Some(rest) = k.strip_prefix("alt+") else { return false };
+    let single =
+        |s: &str| passthrough.iter().any(|p| p.trim().eq_ignore_ascii_case(s));
+    match rest.split_once(" / ") {
+        Some((a, b)) => match b.strip_prefix("alt+") {
+            Some(b) => single(a) && single(b),
+            None => false, // non-Alt alias keeps the row alive
+        },
+        None => single(rest),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn passthrough_hides_only_fully_released_rows() {
+        let p: Vec<String> = ["d", "shift+t", "[", "]"].map(String::from).into();
+        assert!(released("Alt+Shift+T", &p));
+        assert!(released("Alt+[ / Alt+]", &p));
+        // Alias rows survive: the Ctrl+Shift chord is still bound.
+        assert!(!released("Alt+D / Ctrl+Shift+D", &p));
+        assert!(!released("Ctrl+Shift+B", &p));
+        assert!(!released("Alt+W / Ctrl+Shift+W", &p));
+        assert!(!released("Alt+1\u{2026}9", &p));
+    }
+}
