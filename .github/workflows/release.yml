@@ -81,10 +81,13 @@ jobs:
             echo "TAP_GITHUB_TOKEN repo secret to enable automatic bucket updates."
             exit 0
           fi
+          # Pasted secrets can pick up stray CR/LF; a control char in the URL
+          # makes curl fail with "Malformed input to a URL function".
+          TOKEN=$(printf '%s' "$TAP_GITHUB_TOKEN" | tr -d '[:space:]')
           VERSION="${GITHUB_REF_NAME#v}"
           X64_HASH=$(cut -d' ' -f1 "baduhan-${GITHUB_REF_NAME}-windows-x64.zip.sha256")
           ARM64_HASH=$(cut -d' ' -f1 "baduhan-${GITHUB_REF_NAME}-windows-arm64.zip.sha256")
-          git clone "https://x-access-token:${TAP_GITHUB_TOKEN}@github.com/redswoop/scoop-bucket.git"
+          git clone "https://x-access-token:${TOKEN}@github.com/redswoop/scoop-bucket.git"
           cd scoop-bucket
           jq --arg v "$VERSION" --arg x64 "$X64_HASH" --arg arm64 "$ARM64_HASH" '
             .version = $v
