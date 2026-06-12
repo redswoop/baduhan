@@ -22,7 +22,7 @@ to your dev server — in a small, fast, native package.
 | Language | Rust — single native exe, no runtime/VM |
 | PTY | ConPTY via `portable-pty`, one pseudo-console per pane |
 | Process management | Win32 **job object** per pane (`KILL_ON_JOB_CLOSE`) — closing a pane reliably kills the entire child process tree |
-| VT emulation | `alacritty_terminal` — Alacritty's production emulator: truecolor, 256-color, alt screen, scroll regions, SGR mouse, bracketed paste, OSC titles, synchronized updates (mode 2026), styled/colored underlines, OSC 8 hyperlinks — pinned by a [VT conformance test battery](src/vt_tests.rs) |
+| VT emulation | `alacritty_terminal` — Alacritty's production emulator: truecolor, 256-color, alt screen, scroll regions, SGR mouse, bracketed paste, OSC titles, synchronized updates (mode 2026), styled/colored underlines, OSC 8 hyperlinks, OSC 52 clipboard (write-only: apps can set the clipboard, never read it) — pinned by a [VT conformance test battery](src/vt_tests.rs) |
 | Rendering | Direct2D + DirectWrite (GPU), per-monitor-v2 DPI native |
 | Browser panes | WebView2 (Edge) child HWNDs; `SetParentWindow` moves them across windows **without reloading** |
 | UI | Custom-drawn tab bar, pane tree, dividers — no framework. Tabs live **in the title bar** (Windows Terminal-style custom frame): empty tab-bar space drags the window, double-click maximizes, custom min/max/close with Win11 snap-layout support |
@@ -126,9 +126,9 @@ the overlay updates to match).
 ### Terminal
 | Keys | Action |
 |---|---|
-| `Ctrl+Shift+C` / `Ctrl+Shift+V` | Copy / paste (bracketed paste aware) |
+| `Ctrl+Shift+C` / `Ctrl+Shift+V` (also `Ctrl+Insert` / `Shift+Insert`) | Copy / paste (bracketed paste aware) |
 | Mouse selection | Copy-on-select; double-click selects a word |
-| Right-click | Copy selection if any, else paste |
+| Right-click / middle-click | Paste (selections copy themselves on release) |
 | `Ctrl+Shift+F` | Search scrollback (regex; prefills from selection). `Enter`/`↑` older, `Shift+Enter`/`↓` newer, `Esc` closes |
 | `Ctrl+Shift+P` | **Command palette** — fuzzy-search every action |
 | `Ctrl+Shift+/` | **Keyboard shortcut overlay** — any key dismisses |

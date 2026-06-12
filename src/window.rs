@@ -2316,6 +2316,11 @@ impl TermWindow {
                     self.set_font_size(self.active_font_size() - 1.0);
                     return true;
                 },
+                VK_INSERT => {
+                    // Classic Windows copy, alias of Ctrl+Shift+C.
+                    self.copy_selection();
+                    return true;
+                },
                 _ => {},
             }
             let c = vk as u8;
@@ -2451,6 +2456,12 @@ impl TermWindow {
                     _ => {},
                 },
             }
+        }
+
+        // Classic Windows paste, alias of Ctrl+Shift+V.
+        if m.shift && !m.ctrl && !m.alt && vkk == VK_INSERT {
+            self.paste();
+            return true;
         }
 
         if m.ctrl && m.alt {
@@ -3000,19 +3011,22 @@ impl TermWindow {
         if self.mouse_report(pane_id, prect, x, y, 2, true, false, &mods) {
             return;
         }
-        // Copy selection if any, else paste — iTerm2 muscle memory.
-        let has_sel = self
-            .with_active_term(|t| t.term.lock().selection_to_string().is_some())
-            .unwrap_or(false);
-        if has_sel {
-            self.copy_selection();
-            self.with_active_term(|t| {
-                t.term.lock().selection = None;
-            });
-            self.invalidate();
-        } else {
-            self.paste();
+        // Paste (Windows Terminal muscle memory) — selections already
+        // copied themselves on mouse release.
+        self.paste();
+    }
+
+    fn on_mbutton_down(&mut self, x: f32, y: f32) {
+        if y < TABBAR_H {
+            return; // tab bar: WM_MBUTTONUP closes the tab under the cursor
         }
+        let Some((pane_id, prect)) = self.pane_content_at(x, y) else { return };
+        let mods = Mods::current();
+        if self.mouse_report(pane_id, prect, x, y, 1, true, false, &mods) {
+            return;
+        }
+        // Middle-click pastes (X11 / iTerm2 muscle memory).
+        self.paste();
     }
 
     fn on_wheel(&mut self, x: f32, y: f32, delta: i16) {
@@ -3469,6 +3483,11 @@ impl TermWindow {
                 let s = self.scale();
                 let delta = ((wparam.0 >> 16) & 0xffff) as u16 as i16;
                 self.on_wheel(pt.x as f32 / s, pt.y as f32 / s, delta);
+                Some(LRESULT(0))
+            },
+            WM_MBUTTONDOWN => {
+                let (x, y) = self.mouse_dips(lparam);
+                self.on_mbutton_down(x, y);
                 Some(LRESULT(0))
             },
             WM_MBUTTONUP => {

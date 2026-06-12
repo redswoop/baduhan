@@ -103,9 +103,11 @@ impl EventListener for EventProxy {
                 }
             },
             Event::ClipboardLoad(_, fmt) => {
-                let text =
-                    arboard::Clipboard::new().and_then(|mut cb| cb.get_text()).unwrap_or_default();
-                let s = fmt(&text);
+                // OSC 52 is write-only: anything running in the terminal
+                // (including over SSH) could otherwise read the clipboard
+                // silently. Answer with empty rather than going mute so
+                // querying apps don't stall.
+                let s = fmt("");
                 self.0.pty_write(&s);
             },
             Event::ChildExit(_) | Event::Exit => self.0.post(WM_APP_PANE_EXITED),

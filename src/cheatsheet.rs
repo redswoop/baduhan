@@ -50,7 +50,8 @@ pub const PANES: Section = Section {
 pub const TERMINAL: Section = Section {
     title: "Terminal",
     entries: &[
-        e("Ctrl+Shift+C / V", "copy / paste"),
+        e("Ctrl+Shift+C / Ctrl+Insert", "copy (select copies too)"),
+        e("Ctrl+Shift+V / Shift+Insert", "paste (right/middle-click too)"),
         e("Ctrl+Shift+F", "search scrollback"),
         e("Ctrl+Shift+P", "command palette"),
         e("Ctrl+Shift+\u{2191}/\u{2193}", "previous / next prompt"),
