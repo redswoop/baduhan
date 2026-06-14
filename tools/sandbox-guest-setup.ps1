@@ -44,6 +44,15 @@ $common = @{ OutDir = "C:\results"; BaduhanExe = "C:\baduhan.exe"
 & $tc -Target baduhan -Scenario keys @common
 & $tc -Target wt      -Scenario keys @common
 
+# --- text_antialias A/B: same card with cleartype, for fringe analysis ---
+Get-Process baduhan -ErrorAction SilentlyContinue | Stop-Process -Force
+$cfg = Get-Content "$env:APPDATA\baduhan\settings.json" -Raw | ConvertFrom-Json
+$cfg | Add-Member NoteProperty text_antialias "cleartype" -Force
+$cfg | ConvertTo-Json -Depth 5 | Out-File "$env:APPDATA\baduhan\settings.json" -Encoding ascii
+$ct = $common.Clone(); $ct.OutDir = "C:\results\cleartype"
+& $tc -Target baduhan -Scenario card @ct
+Move-Item C:\results\cleartype\baduhan-card.png C:\results\baduhan-card-cleartype.png -Force
+
 # keyecho text outputs land in ~; copy them out too.
 Copy-Item "$env:USERPROFILE\keyecho-*.txt" C:\results -ErrorAction SilentlyContinue
 "SUITE COMPLETE $(Get-Date)" | Out-File C:\results\DONE.txt -Encoding ascii

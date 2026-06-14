@@ -29,6 +29,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, GetMessageW, TranslateMessage, MSG,
 };
 
+/// "baduhan 0.2.1 (c522c94)" — version from Cargo.toml, commit stamped by
+/// build.rs ("-dirty" when built from an unclean tree).
+pub const VERSION: &str =
+    concat!("baduhan ", env!("CARGO_PKG_VERSION"), " (", env!("BADUHAN_GIT_DESC"), ")");
+
 fn main() {
     // CLI mode: `baduhan browse <url>` etc. talks to the running instance.
     let args: Vec<String> = std::env::args().skip(1).collect();

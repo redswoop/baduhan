@@ -120,6 +120,10 @@ pub struct TermWindow {
     /// Transient on-screen announcement ("theme: Dracula").
     toast: Option<String>,
     drag: Drag,
+    /// Time/position of the last double-click, for triple-click detection
+    /// (Windows only synthesizes WM_LBUTTONDBLCLK; the third press arrives
+    /// as a plain WM_LBUTTONDOWN).
+    last_dblclick: Option<(std::time::Instant, f32, f32)>,
     edit_font: HFONT,
     edit_brush: HBRUSH,
     suppress_char: bool,
@@ -152,6 +156,7 @@ impl TermWindow {
             hot_caption: None,
             toast: None,
             drag: Drag::None,
+            last_dblclick: None,
             edit_font,
             edit_brush,
             suppress_char: false,
@@ -571,6 +576,9 @@ impl TermWindow {
         let gfx = app::gfx();
         unsafe {
             win.rt.BeginDraw();
+            // Cheap to re-set every frame, and it keeps the mode live across
+            // settings hot-reloads and local <-> RDP session moves.
+            win.rt.SetTextAntialiasMode(crate::renderer::text_aa_mode());
         }
         unsafe {
             win.rt.Clear(Some(&palette::d2d(palette::CHROME_BG)));
@@ -1562,6 +1570,18 @@ impl TermWindow {
     /// URL under a viewport cell: an OSC 8 hyperlink on the cell, or a plain
     /// URL token detected in the row text around it.
     fn link_at(&self, pane_id: PaneId, prect: RectF, x: f32, y: f32) -> Option<String> {
+        self.link_span_at(pane_id, prect, x, y).map(|(url, _, _)| url)
+    }
+
+    /// `link_at`, plus where the link sits: its term-coords line and the
+    /// inclusive column range it covers (so double-click can select it).
+    fn link_span_at(
+        &self,
+        pane_id: PaneId,
+        prect: RectF,
+        x: f32,
+        y: f32,
+    ) -> Option<(String, Line, std::ops::RangeInclusive<usize>)> {
         let tab = self.tabs.get(self.active)?;
         let pane = tab.pane(pane_id)?;
         let PaneKind::Term(t) = &pane.kind else { return None };
@@ -1574,24 +1594,37 @@ impl TermWindow {
         }
         let display_offset = term.grid().display_offset() as i32;
         let line = Line(row as i32 - display_offset);
-        let cell = &term.grid()[line][Column(col)];
-        if let Some(h) = cell.hyperlink() {
-            return Some(h.uri().to_string());
+        if let Some(h) = term.grid()[line][Column(col)].hyperlink() {
+            // Span: the contiguous run of cells carrying the same OSC 8 target.
+            let uri = h.uri().to_string();
+            let same = |cx: usize| {
+                term.grid()[line][Column(cx)].hyperlink().is_some_and(|h| h.uri() == uri)
+            };
+            let mut s = col;
+            while s > 0 && same(s - 1) {
+                s -= 1;
+            }
+            let mut e = col;
+            while e + 1 < cols && same(e + 1) {
+                e += 1;
+            }
+            return Some((uri, line, s..=e));
         }
         // Plain-text URL: walk the row, find the whitespace-delimited token
         // covering the clicked column.
-        let mut text = String::new();
+        let mut chars: Vec<char> = Vec::with_capacity(cols);
+        let mut char_col: Vec<usize> = Vec::with_capacity(cols); // char idx -> col
         let mut cell_to_char: Vec<usize> = Vec::with_capacity(cols);
         for cx in 0..cols {
             let c = &term.grid()[line][Column(cx)];
-            cell_to_char.push(text.chars().count());
+            cell_to_char.push(chars.len());
             if c.flags.contains(alacritty_terminal::term::cell::Flags::WIDE_CHAR_SPACER) {
                 continue;
             }
-            text.push(c.c);
+            chars.push(c.c);
+            char_col.push(cx);
         }
         drop(term);
-        let chars: Vec<char> = text.chars().collect();
         let pos = *cell_to_char.get(col)?;
         if pos >= chars.len() || chars[pos].is_whitespace() {
             return None;
@@ -1604,15 +1637,18 @@ impl TermWindow {
         while end + 1 < chars.len() && !chars[end + 1].is_whitespace() {
             end += 1;
         }
+        while end > start && [',', '.', ';', ')', ']', '>', '"', '\''].contains(&chars[end]) {
+            end -= 1;
+        }
         let token: String = chars[start..=end].iter().collect();
-        let token = token.trim_end_matches(['.', ',', ';', ')', ']', '>', '"', '\'']);
         for scheme in ["https://", "http://", "file://"] {
             if let Some(i) = token.find(scheme) {
-                return Some(token[i..].to_string());
+                let skip = token[..i].chars().count();
+                return Some((token[i..].to_string(), line, char_col[start + skip]..=char_col[end]));
             }
         }
         if token.starts_with("www.") && token.contains('.') {
-            return Some(format!("https://{token}"));
+            return Some((format!("https://{token}"), line, char_col[start]..=char_col[end]));
         }
         None
     }
@@ -1986,6 +2022,13 @@ impl TermWindow {
             &self.fonts.ui,
             rf(x0 + PAD, y0 + 10.0, x0 + pw - PAD, y0 + 36.0),
             palette::d2d(palette::TAB_TEXT_ACTIVE),
+        );
+        win.text_right(
+            gfx,
+            crate::VERSION,
+            &self.fonts.ui,
+            rf(x0 + PAD, y0 + 10.0, x0 + pw - PAD, y0 + 36.0),
+            palette::d2d_a(palette::TAB_TEXT, 0.55),
         );
 
         let draw_section =
@@ -2763,6 +2806,17 @@ impl TermWindow {
                 return;
             }
 
+            // Third press of a triple-click arrives as a plain button-down
+            // (Windows only synthesizes up to WM_LBUTTONDBLCLK).
+            let triple = self.last_dblclick.take().is_some_and(|(t, lx, ly)| {
+                t.elapsed().as_millis()
+                    <= u128::from(unsafe {
+                        windows::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime()
+                    })
+                    && (x - lx).abs() <= 6.0
+                    && (y - ly).abs() <= 6.0
+            });
+
             // Begin text selection.
             let (col, row, side) = self.cell_at(crect, x, y);
             if let Some(tab) = self.tabs.get(self.active)
@@ -2775,7 +2829,19 @@ impl TermWindow {
                         Line(row.min(lines - 1) as i32 - display_offset as i32),
                         Column(col.min(cols - 1)),
                     );
-                    term.selection = Some(Selection::new(SelectionType::Simple, point, side));
+                    if triple {
+                        // Triple-click: whole line (drag extends by lines).
+                        term.selection =
+                            Some(Selection::new(SelectionType::Lines, point, side));
+                    } else if mods.shift && term.selection.is_some() {
+                        // Shift+click: extend the existing selection.
+                        if let Some(sel) = &mut term.selection {
+                            sel.update(point, side);
+                        }
+                    } else {
+                        term.selection =
+                            Some(Selection::new(SelectionType::Simple, point, side));
+                    }
                     drop(term);
                     self.drag = Drag::Select;
                     self.invalidate();
@@ -2793,6 +2859,9 @@ impl TermWindow {
             return;
         }
         let (col, row, side) = self.cell_at(prect, x, y);
+        // iTerm2-style: double-click inside a link selects the whole link
+        // (URLs span the semantic escape chars that word selection breaks on).
+        let link_span = self.link_span_at(pane_id, prect, x, y);
         if let Some(tab) = self.tabs.get(self.active)
             && let Some(PaneKind::Term(t)) = tab.pane(pane_id).map(|p| &p.kind) {
                 let mut term = t.term.lock();
@@ -2803,9 +2872,21 @@ impl TermWindow {
                     Line(row.min(lines - 1) as i32 - display_offset as i32),
                     Column(col.min(cols - 1)),
                 );
-                term.selection = Some(Selection::new(SelectionType::Semantic, point, side));
+                term.selection = match link_span {
+                    Some((_, line, span)) => {
+                        let mut sel = Selection::new(
+                            SelectionType::Simple,
+                            Point::new(line, Column(*span.start())),
+                            Side::Left,
+                        );
+                        sel.update(Point::new(line, Column(*span.end())), Side::Right);
+                        Some(sel)
+                    },
+                    None => Some(Selection::new(SelectionType::Semantic, point, side)),
+                };
                 drop(term);
                 self.drag = Drag::Select;
+                self.last_dblclick = Some((std::time::Instant::now(), x, y));
                 unsafe {
                     SetCapture(self.hwnd);
                 }

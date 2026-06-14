@@ -38,6 +38,12 @@ pub struct Config {
     pub font_family: String,
     #[serde(default = "default_font_size")]
     pub font_size: f32,
+    /// Text antialiasing: "grayscale" (default — what modern Windows apps
+    /// use; renders identically locally and over RDP), "cleartype" (subpixel
+    /// fringes; assumes a local RGB-stripe panel), or "auto" (cleartype
+    /// locally, grayscale in remote sessions).
+    #[serde(default = "default_text_antialias")]
+    pub text_antialias: String,
     /// 0.0 disables; otherwise the opacity of the black veil drawn over
     /// inactive terminal panes (iTerm2-style split dimming).
     #[serde(default = "default_dim")]
@@ -79,6 +85,9 @@ fn default_font_family() -> String {
 fn default_font_size() -> f32 {
     13.0
 }
+fn default_text_antialias() -> String {
+    "grayscale".into()
+}
 fn default_dim() -> f32 {
     0.22
 }
@@ -100,6 +109,7 @@ impl Default for Config {
         Config {
             font_family: default_font_family(),
             font_size: default_font_size(),
+            text_antialias: default_text_antialias(),
             dim_inactive_panes: default_dim(),
             scrollback_lines: default_scrollback(),
             browser_debug_port: default_cdp_port(),

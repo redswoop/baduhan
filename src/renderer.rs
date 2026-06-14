@@ -192,6 +192,21 @@ impl FontSet {
     }
 }
 
+/// Text AA mode from the `text_antialias` setting. ClearType's red/blue
+/// subpixel fringes assume a local RGB-stripe panel; "auto" drops to
+/// grayscale whenever the session is remote, where RDP's codec re-encodes
+/// the fringes into color noise. Unknown values get the grayscale default.
+pub fn text_aa_mode() -> D2D1_TEXT_ANTIALIAS_MODE {
+    use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_REMOTESESSION};
+    match crate::app::config().text_antialias.as_str() {
+        "cleartype" => D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE,
+        "auto" if unsafe { GetSystemMetrics(SM_REMOTESESSION) } == 0 => {
+            D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE
+        },
+        _ => D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE,
+    }
+}
+
 /// Per-window render target + scratch brush. `rt` is the generic interface
 /// so the same painting code can draw to the screen or to a WIC bitmap
 /// (debug frame dumps).
@@ -217,7 +232,7 @@ impl WindowGfx {
             let hwnd_rt = gfx.d2d.CreateHwndRenderTarget(&props, &hwnd_props)?;
             let rt: ID2D1RenderTarget = windows::core::Interface::cast(&hwnd_rt)?;
             rt.SetDpi(dpi, dpi);
-            rt.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
+            rt.SetTextAntialiasMode(text_aa_mode());
             let brush = rt.CreateSolidColorBrush(&palette::d2d(palette::DEFAULT_FG), None)?;
             Ok(WindowGfx {
                 rt,
@@ -254,7 +269,7 @@ impl WindowGfx {
             };
             let rt = gfx.d2d.CreateWicBitmapRenderTarget(&bmp, &props)?;
             rt.SetDpi(dpi, dpi);
-            rt.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
+            rt.SetTextAntialiasMode(text_aa_mode());
             let brush = rt.CreateSolidColorBrush(&palette::d2d(palette::DEFAULT_FG), None)?;
             Ok((
                 WindowGfx {
@@ -333,6 +348,30 @@ impl WindowGfx {
         rect: D2D_RECT_F,
         color: D2D1_COLOR_F,
     ) {
+        self.text_aligned(gfx, s, format, rect, color, DWRITE_TEXT_ALIGNMENT_LEADING);
+    }
+
+    /// `text`, but right-aligned within `rect`.
+    pub fn text_right(
+        &self,
+        gfx: &Gfx,
+        s: &str,
+        format: &IDWriteTextFormat,
+        rect: D2D_RECT_F,
+        color: D2D1_COLOR_F,
+    ) {
+        self.text_aligned(gfx, s, format, rect, color, DWRITE_TEXT_ALIGNMENT_TRAILING);
+    }
+
+    fn text_aligned(
+        &self,
+        gfx: &Gfx,
+        s: &str,
+        format: &IDWriteTextFormat,
+        rect: D2D_RECT_F,
+        color: D2D1_COLOR_F,
+        align: DWRITE_TEXT_ALIGNMENT,
+    ) {
         if s.is_empty() {
             return;
         }
@@ -344,6 +383,9 @@ impl WindowGfx {
                 (rect.right - rect.left).max(0.0),
                 (rect.bottom - rect.top).max(0.0),
             ) {
+                if align != DWRITE_TEXT_ALIGNMENT_LEADING {
+                    let _ = layout.SetTextAlignment(align);
+                }
                 let _ = layout.SetTrimming(
                     &DWRITE_TRIMMING {
                         granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER,

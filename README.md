@@ -44,6 +44,7 @@ and every registered WSL distro. Delete the file to re-import.
 {
   "font_family": "JetBrainsMonoNL Nerd Font",  // typographic or GDI ("… NF") names both work
   "font_size": 13.0,                   // Ctrl+=/− and Ctrl+wheel zoom per tab
+  "text_antialias": "grayscale",       // or "cleartype" / "auto" (cleartype locally, grayscale over RDP)
   "dim_inactive_panes": 0.22,          // 0.0 disables split dimming
   "scrollback_lines": 10000,           // per pane; alt screen never scrolls
   "browser_debug_port": 9333,          // CDP for Playwright etc.; 0 disables

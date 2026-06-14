@@ -29,24 +29,36 @@ pub fn run(args: &[String]) -> ! {
         let _ = AttachConsole(ATTACH_PARENT_PROCESS);
     }
 
+    const USAGE: &str = concat!(
+        "usage: baduhan                 launch the terminal (no args)\n\n",
+        "inside a baduhan pane:\n  ",
+        "baduhan browse <url>   load a URL in this tab's browser pane\n  ",
+        "baduhan reload         reload this tab's browser pane\n  ",
+        "baduhan devtools       open DevTools for this tab's browser pane\n  ",
+        "baduhan cdp            print the Chrome DevTools Protocol endpoint\n  ",
+        "baduhan view <image>   show an image inline (PNG/JPEG/GIF/BMP)\n\n",
+        "settings (apply live to running terminals):\n  ",
+        "baduhan theme <file>   import a color theme (.itermcolors or WT json)\n  ",
+        "baduhan font <family>  set the font family\n  ",
+        "baduhan fontsize <pt>  set the default font size\n\n  ",
+        "baduhan --help         this help\n  ",
+        "baduhan --version      print version and exit"
+    );
     let usage = || -> ! {
-        eprintln!(
-            "usage (inside a baduhan pane):\n  \
-             baduhan browse <url>   load a URL in this tab's browser pane\n  \
-             baduhan reload         reload this tab's browser pane\n  \
-             baduhan devtools       open DevTools for this tab's browser pane\n  \
-             baduhan cdp            print the Chrome DevTools Protocol endpoint\n  \
-             baduhan view <image>   show an image inline (PNG/JPEG/GIF/BMP)\n\n  \
-             settings (apply live to running terminals):\n  \
-             baduhan theme <file>   import a color theme (.itermcolors or WT json)\n  \
-             baduhan font <family>  set the font family\n  \
-             baduhan fontsize <pt>  set the default font size"
-        );
+        eprintln!("{USAGE}");
         std::process::exit(2);
     };
 
     let verb = args.first().map(String::as_str).unwrap_or("");
     let (verb, arg) = match verb {
+        "--version" | "-V" | "version" => {
+            println!("{}", crate::VERSION);
+            std::process::exit(0);
+        },
+        "--help" | "-h" | "help" => {
+            println!("{}\n\n{USAGE}", crate::VERSION);
+            std::process::exit(0);
+        },
         "browse" | "open" => {
             let Some(url) = args.get(1) else { usage() };
             ("browse", url.clone())

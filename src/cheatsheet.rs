@@ -57,6 +57,8 @@ pub const TERMINAL: Section = Section {
         e("Ctrl+Shift+\u{2191}/\u{2193}", "previous / next prompt"),
         e("Ctrl+Shift+Space", "quick select (hints)"),
         e("Ctrl+Click", "open URL under cursor"),
+        e("2x / 3x click", "select word, link / line"),
+        e("Shift+Click", "extend selection"),
         e("Shift+PgUp/PgDn", "scrollback paging"),
         e("Ctrl+= / - / 0", "font bigger / smaller / reset"),
         e("Shift+Enter", "newline in Claude Code etc."),
