@@ -28,6 +28,7 @@ pub enum PaletteAction {
     OpenSettings,
     OpenInitLua,
     Cheatsheet,
+    ResetTerminal,
 }
 
 pub struct Item {
@@ -63,6 +64,7 @@ pub fn items(profiles: &[Profile], themes: &[String]) -> Vec<Item> {
     v.push(it("Font: Smaller", "Ctrl+-", PaletteAction::FontSmaller));
     v.push(it("Font: Reset", "Ctrl+0", PaletteAction::FontReset));
     v.push(it("Search Scrollback", "Ctrl+Shift+F", PaletteAction::Search));
+    v.push(it("Reset Terminal (unstick alt screen / mouse)", "Ctrl+Shift+R", PaletteAction::ResetTerminal));
     v.push(it("Move Tab Left", "Ctrl+Shift+PgUp", PaletteAction::MoveTabLeft));
     v.push(it("Move Tab Right", "Ctrl+Shift+PgDn", PaletteAction::MoveTabRight));
     v.push(it("Jump to Previous Prompt", "Ctrl+Shift+Up", PaletteAction::PromptPrev));

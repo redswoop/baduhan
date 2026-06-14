@@ -44,6 +44,13 @@ const PLUS_W: f32 = 28.0;
 const BTN_W: f32 = 30.0;
 
 const D2DERR_RECREATE_TARGET: i32 = 0x8899000Cu32 as i32;
+/// Off-switches for the interaction-breaking private modes, replayed by
+/// "Reset Terminal" to unstick a terminal an app left wedged: alt screen
+/// (47/1047/1049), every mouse mode (1000/1002/1003/1005/1006/1015), focus
+/// events (1004), bracketed paste (2004), app cursor (1), cursor visible (25).
+pub(crate) const TERM_RESET_SEQ: &[u8] = b"\x1b[?1049l\x1b[?1047l\x1b[?47l\
+    \x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l\
+    \x1b[?1004l\x1b[?2004l\x1b[?1l\x1b[?25h";
 /// Session lock/unlock notification + its wparam codes (winuser.h); not
 /// surfaced by the windows crate, so spelled out here.
 const WM_WTSSESSION_CHANGE: u32 = 0x02B1;
@@ -1895,6 +1902,24 @@ impl TermWindow {
         self.palette_refresh();
     }
 
+    /// Recover a terminal a full-screen app left wedged: vim killed or
+    /// Ctrl+Z-suspended (and `less`, `htop`, … crashing) never sends its
+    /// reset sequences, so the alt screen and mouse reporting stay on and the
+    /// wheel / Shift+PgUp can no longer reach the scrollback. Replay the
+    /// off-switches for the interaction-breaking private modes — leaving the
+    /// grid and scrollback intact — then drop to the bottom.
+    fn reset_active_term(&mut self) {
+        self.with_active_term(|t| {
+            let mut p: alacritty_terminal::vte::ansi::Processor =
+                alacritty_terminal::vte::ansi::Processor::new();
+            let mut term = t.term.lock();
+            p.advance(&mut *term, TERM_RESET_SEQ);
+            term.scroll_display(Scroll::Bottom);
+        });
+        self.show_toast("\u{21BA} terminal reset".into());
+        self.invalidate();
+    }
+
     fn run_palette_action(&mut self, a: crate::command_palette::PaletteAction) {
         use crate::command_palette::PaletteAction as A;
         match a {
@@ -1922,6 +1947,7 @@ impl TermWindow {
             A::Cheatsheet => self.cheatsheet = true,
             A::OpenSettings => self.open_settings_file(false),
             A::OpenInitLua => self.open_settings_file(true),
+            A::ResetTerminal => self.reset_active_term(),
             A::ThemeNext => self.cycle_theme(),
             A::Theme(name) => {
                 let theme = crate::config::list_themes()
@@ -2331,6 +2357,7 @@ impl TermWindow {
                 b'C' => self.copy_selection(),
                 b'V' => self.paste(),
                 b'F' => self.toggle_search(),
+                b'R' => self.reset_active_term(),
                 b'P' => self.open_palette(),
                 b'S' => self.cycle_theme(),
                 c @ b'1'..=b'9' => {

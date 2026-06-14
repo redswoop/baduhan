@@ -270,6 +270,30 @@ fn alt_screen_1049_preserves_primary() {
     assert_eq!(vt.row(0), "primary content");
 }
 
+#[test]
+fn reset_terminal_unsticks_alt_screen_and_mouse() {
+    use alacritty_terminal::grid::Scroll;
+    let mut vt = Vt::new(20, 5);
+    for i in 0..40 {
+        vt.feed(format!("line{i}\r\n").as_bytes());
+    }
+    // A full-screen app wedged the terminal: alt screen + mouse reporting on,
+    // never reset (killed / Ctrl+Z-suspended). Scroll is now unreachable.
+    vt.feed(b"\x1b[?1049h\x1b[?1002h\x1b[?1006h");
+    assert!(vt.term.mode().contains(TermMode::ALT_SCREEN));
+    assert!(vt.term.mode().intersects(TermMode::MOUSE_MODE));
+    vt.term.scroll_display(Scroll::Delta(5));
+    assert_eq!(vt.term.grid().display_offset(), 0, "alt screen has no scrollback");
+
+    // "Reset Terminal" replays the exact bytes window.rs sends.
+    vt.feed(crate::window::TERM_RESET_SEQ);
+    assert!(!vt.term.mode().contains(TermMode::ALT_SCREEN));
+    assert!(!vt.term.mode().intersects(TermMode::MOUSE_MODE));
+    // Scrollback is reachable again.
+    vt.term.scroll_display(Scroll::Delta(5));
+    assert!(vt.term.grid().display_offset() > 0, "scrollback restored after reset");
+}
+
 // ----- modes -----------------------------------------------------------------
 
 #[test]
