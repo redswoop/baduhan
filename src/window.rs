@@ -10,6 +10,9 @@ use windows::core::HSTRING;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::UI::HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi};
+use windows::Win32::System::RemoteDesktop::{
+    WTSRegisterSessionNotification, WTSUnRegisterSessionNotification, NOTIFY_FOR_THIS_SESSION,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -41,6 +44,11 @@ const PLUS_W: f32 = 28.0;
 const BTN_W: f32 = 30.0;
 
 const D2DERR_RECREATE_TARGET: i32 = 0x8899000Cu32 as i32;
+/// Session lock/unlock notification + its wparam codes (winuser.h); not
+/// surfaced by the windows crate, so spelled out here.
+const WM_WTSSESSION_CHANGE: u32 = 0x02B1;
+const WTS_SESSION_LOCK: u32 = 0x7;
+const WTS_SESSION_UNLOCK: u32 = 0x8;
 /// SetTimer id for clearing the announcement toast.
 const TOAST_TIMER_ID: usize = 0xBA3;
 
@@ -124,6 +132,11 @@ pub struct TermWindow {
     /// (Windows only synthesizes WM_LBUTTONDBLCLK; the third press arrives
     /// as a plain WM_LBUTTONDOWN).
     last_dblclick: Option<(std::time::Instant, f32, f32)>,
+    /// Set between WTS_SESSION_LOCK and WTS_SESSION_UNLOCK. While locked the
+    /// display can drop to a fallback resolution and Windows resizes us small;
+    /// we ignore those transient sizes so the terminal grid (and its
+    /// scrollback) isn't reflowed to a sliver and back.
+    session_locked: bool,
     edit_font: HFONT,
     edit_brush: HBRUSH,
     suppress_char: bool,
@@ -157,6 +170,7 @@ impl TermWindow {
             toast: None,
             drag: Drag::None,
             last_dblclick: None,
+            session_locked: false,
             edit_font,
             edit_brush,
             suppress_char: false,
@@ -463,6 +477,12 @@ impl TermWindow {
     // ----- layout ----------------------------------------------------------
 
     pub fn relayout(&mut self) {
+        // Don't reflow the terminal grid to a degenerate size: minimized
+        // windows report a 0/tiny client rect, and a locked session may be
+        // sitting at a fallback resolution. Either way, wait for the real size.
+        if self.session_locked || unsafe { IsIconic(self.hwnd) }.as_bool() {
+            return;
+        }
         let area = self.pane_area();
         let scale = self.scale();
         let (cw, ch) = {
@@ -3243,6 +3263,14 @@ impl TermWindow {
                 }
                 crate::dragdrop::register(self.hwnd);
                 app::ensure_quake_hotkey(self.hwnd);
+                // Lock/unlock notifications: drive device-recreate on unlock
+                // and let us ignore resolution-drop resizes while locked.
+                unsafe {
+                    let _ = WTSRegisterSessionNotification(
+                        self.hwnd,
+                        NOTIFY_FOR_THIS_SESSION,
+                    );
+                }
                 unsafe {
                     SetTimer(Some(self.hwnd), app::CONFIG_TIMER_ID, 1000, None);
                 }
@@ -3254,8 +3282,28 @@ impl TermWindow {
                 Some(LRESULT(0))
             },
             WM_DESTROY => {
+                unsafe {
+                    let _ = WTSUnRegisterSessionNotification(self.hwnd);
+                }
                 crate::dragdrop::revoke(self.hwnd);
                 None
+            },
+            WM_WTSSESSION_CHANGE => {
+                match wparam.0 as u32 {
+                    WTS_SESSION_LOCK => self.session_locked = true,
+                    WTS_SESSION_UNLOCK => {
+                        self.session_locked = false;
+                        // The GPU device is usually lost across a lock; drop the
+                        // render target so the next paint rebuilds it, then force
+                        // that paint (nothing else dirties us on unlock, which is
+                        // why the window otherwise stays blank until first click).
+                        self.gfx_win = None;
+                        self.relayout();
+                        self.invalidate();
+                    },
+                    _ => {},
+                }
+                Some(LRESULT(0))
             },
             WM_HOTKEY => {
                 app::toggle_quake();
@@ -3430,7 +3478,11 @@ impl TermWindow {
             WM_ERASEBKGND => Some(LRESULT(1)),
             WM_SIZE => {
                 let (w, h) = (loword(lparam.0 as u32), hiword(lparam.0 as u32));
-                if w > 0 && h > 0 {
+                // While locked the display can fall back to a low resolution and
+                // resize us small; reflowing the grid to that and back mangles
+                // the scrollback (it wraps at the sliver width). Ignore it — the
+                // restore on unlock brings a WM_SIZE at the real size.
+                if w > 0 && h > 0 && !self.session_locked {
                     if let Some(g) = &self.gfx_win {
                         g.resize(w as u32, h as u32);
                     }
